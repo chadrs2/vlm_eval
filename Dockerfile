@@ -1,0 +1,191 @@
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+############################################################
+# System dependencies
+############################################################
+
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    curl \
+    vim \
+    unzip \
+    ffmpeg \
+    tmux \
+    build-essential \
+    cmake \
+    ninja-build \
+    libgl1 \
+    libglib2.0-0 \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
+
+############################################################
+# Install Miniconda
+############################################################
+
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh
+
+
+ENV PATH=/opt/conda/bin:$PATH
+
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+RUN conda config --remove channels defaults || true && \
+    conda config --add channels conda-forge && \
+    conda config --set channel_priority strict
+
+
+############################################################
+# Create environments
+############################################################
+
+RUN conda create -y \
+    -n main \
+    python=3.10 \
+    pip
+
+
+RUN conda create -y \
+    -n clipdino \
+    python=3.9 \
+    pip
+
+
+############################################################
+# MAIN ENVIRONMENT
+############################################################
+
+# PyTorch 2.x CUDA 11.8
+
+RUN conda run -n main pip install \
+    torch \
+    torchvision \
+    torchaudio \
+    --index-url https://download.pytorch.org/whl/cu118
+
+
+COPY requirements_main.txt /tmp/
+
+RUN conda run -n main pip install \
+    -r /tmp/requirements_main.txt
+
+
+############################################################
+# Install modern model repositories
+############################################################
+
+RUN mkdir -p /workspace/projects
+
+# Ensure NVCC and CUDA toolkit binaries are discoverable by setuptools/torch
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+COPY install_main_models.sh /tmp/
+
+RUN chmod +x /tmp/install_main_models.sh && \
+    conda run -n main /tmp/install_main_models.sh
+
+
+############################################################
+# CLIP-DINOISER ENVIRONMENT
+############################################################
+
+RUN conda run -n clipdino pip install \
+    torch==1.12.1 \
+    torchvision==0.13.1 \
+    --extra-index-url https://download.pytorch.org/whl/cu116
+
+
+RUN conda run -n clipdino pip install \
+    openmim
+
+
+RUN conda run -n clipdino \
+    mim install mmengine
+
+
+RUN conda run -n clipdino \
+    mim install "mmcv-full==1.6.0"
+
+
+RUN conda run -n clipdino \
+    mim install "mmsegmentation==0.27.0"
+
+
+COPY requirements_clipdino.txt /tmp/
+
+RUN conda run -n clipdino pip install open_clip_torch --no-deps
+RUN conda run -n clipdino pip install -r /tmp/requirements_clipdino.txt
+
+
+COPY install_clipdino.sh /tmp/
+
+RUN chmod +x /tmp/install_clipdino.sh && \
+    conda run -n clipdino /tmp/install_clipdino.sh
+
+
+############################################################
+# Workspace directories
+############################################################
+
+RUN mkdir -p \
+    /workspace/models \
+    /workspace/datasets \
+    /workspace/notebooks \
+    /workspace/projects
+
+
+############################################################
+# Helpful environment variables
+############################################################
+
+ENV PYTHONPATH="/workspace/projects:/workspace/projects/clip_dinoiser"
+
+ENV MODEL_DIR=/workspace/models
+ENV DATASET_DIR=/workspace/datasets
+
+
+############################################################
+# Convenience activation scripts
+############################################################
+
+# RUN echo '#!/bin/bash\n\
+# source /opt/conda/etc/profile.d/conda.sh\n\
+# conda activate main' \
+# > /usr/local/bin/activate-main && \
+# chmod +x /usr/local/bin/activate-main
+
+
+# RUN echo '#!/bin/bash\n\
+# source /opt/conda/etc/profile.d/conda.sh\n\
+# conda activate clipdino' \
+# > /usr/local/bin/activate-clipdino && \
+# chmod +x /usr/local/bin/activate-clipdino
+
+# Add convenience aliases to ~/.bashrc
+RUN echo 'alias activate-main="source /opt/conda/etc/profile.d/conda.sh && conda activate main"' >> /root/.bashrc && \
+    echo 'alias activate-clipdino="source /opt/conda/etc/profile.d/conda.sh && conda activate clipdino"' >> /root/.bashrc
+
+
+############################################################
+# Default
+############################################################
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]
