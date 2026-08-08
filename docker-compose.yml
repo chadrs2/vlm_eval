@@ -21,7 +21,7 @@ services:
       - ./workspace/data:/workspace/datasets
       - ./workspace/models:/workspace/models
       - ./workspace/notebooks:/workspace/notebooks
-      # - ./workspace/projects:/workspace/projects
+      - ./workspace/projects:/workspace/projects
     environment:
       - MODEL_DIR=/workspace/models
       - DATASET_DIR=/workspace/datasets

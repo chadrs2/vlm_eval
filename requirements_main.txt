@@ -1,18 +1,18 @@
-numpy
+setuptools<81
+numpy>=1.26,<2
 scipy
 matplotlib
 opencv-python
 pillow
 tqdm
+iopath
 
-transformers
 accelerate
 huggingface_hub
 safetensors
 
 timm
 einops
-xformers
 
 ultralytics
 supervision
