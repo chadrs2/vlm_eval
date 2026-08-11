@@ -5,7 +5,7 @@ Workspace for evaluating multiple different VLMs
 ## Set Up
 
 1. Build Docker Image if not already done: `$ docker compose build`
-2. Start up docker container with: `$ docker compose run --rm vision_foundation_models /bin/bash`
+2. Start up docker container with: `$ docker compose run --rm vision_foundation_models bash`
 
 ## Usage
 
@@ -17,6 +17,6 @@ Workspace for evaluating multiple different VLMs
 
 ### Hugging Face
 
-1. Log into hugging face within the docker container in the `activate-main` conda environment with: `$ hf auth login`
+1. Log into hugging face within the docker container in the `activate-main` conda environment with: `$ hf auth login` OR `$ huggingface-cli login`
    1. Paste a generated authorization token from your hugging face account
 2. To access SAM3 model: Request access for the SAM3 model at: https://huggingface.co/facebook/sam3

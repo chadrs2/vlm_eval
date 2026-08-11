@@ -1,12 +1,6 @@
 [submodule "workspace/projects/Grounded-Segment-Anything"]
 	path = workspace/projects/Grounded-Segment-Anything
 	url = https://github.com/IDEA-Research/Grounded-Segment-Anything.git
-[submodule "workspace/projects/GroundingDINO"]
-	path = workspace/projects/GroundingDINO
-	url = https://github.com/IDEA-Research/GroundingDINO.git
-[submodule "workspace/projects/sam3"]
-	path = workspace/projects/sam3
-	url = https://github.com/facebookresearch/sam3.git
 [submodule "workspace/projects/clip_dinoiser"]
 	path = workspace/projects/clip_dinoiser
 	url = https://github.com/wysoczanska/clip_dinoiser.git

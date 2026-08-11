@@ -5,10 +5,13 @@ services:
       dockerfile: Dockerfile
     image: vision_foundation_models:latest
     container_name: vision_foundation_models_dev
-    stdin_open: true  # Keeps container interactive (-i)
-    tty: true         # Allocates pseudo-TTY (-t)
-    working_dir: /workspace
-    shm_size: '8g'    # Prevents PyTorch DataLoader OOM crashes
+    stdin_open: true
+    tty: true
+    ipc: host
+    shm_size: '8gb'
+    volumes:
+      # Mount workspace directory into /workspace inside container
+      - ./workspace:/workspace
     deploy:
       resources:
         reservations:
@@ -16,13 +19,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    volumes:
-      # Mount host directories into the container for persistence
-      - ./workspace/data:/workspace/datasets
-      - ./workspace/models:/workspace/models
-      - ./workspace/notebooks:/workspace/notebooks
-      - ./workspace/projects:/workspace/projects
     environment:
-      - MODEL_DIR=/workspace/models
-      - DATASET_DIR=/workspace/datasets
-      - PYTHONPATH=/workspace/projects:/workspace/projects/clip_dinoiser:/workspace/projects/sam3:/workspace/projects/GroundingDINO:/workspace/projects/Grounded-Segment-Anything
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    working_dir: /workspace
