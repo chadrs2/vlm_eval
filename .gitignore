@@ -4,3 +4,5 @@ workspace/models/
 *.pt
 *.ts
 old_files/*
+notebooks/runs/*
+notebooks/weights/*
