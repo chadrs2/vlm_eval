@@ -1,0 +1,13 @@
+name: clipdino
+
+channels:
+  - defaults
+  - conda-forge
+
+dependencies:
+  - python=3.9
+  - pip
+  - jupyter
+  - ipykernel
+  - setuptools=80.9.0
+  - wheel

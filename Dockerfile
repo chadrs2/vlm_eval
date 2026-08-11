@@ -75,16 +75,43 @@ COPY radio_env.yml /tmp/radio_env.yml
 RUN conda env create -f /tmp/radio_env.yml && \
     conda clean -a -y
 
-# Copy the RADIO repository
-COPY workspace/projects/nvidia_radio /tmp/nvidia_radio
+ENV PATH=/root/miniconda3/envs/radio/bin:$PATH
 
-# Install RADIO into the radio environment
-RUN rm -rf /tmp/nvidia_radio /tmp/radio_env.yml
+# # Copy the RADIO repository
+# COPY workspace/projects/nvidia_radio /tmp/nvidia_radio
+
+# # Install RADIO into the radio environment
+# RUN rm -rf /tmp/nvidia_radio /tmp/radio_env.yml
 
 
 ###################
 ## CLIP-DINOiser ##
 ###################
+# Base environment creation
+COPY clipdino_env.yml /tmp/clipdino_env.yml
+
+RUN conda env create -f /tmp/clipdino_env.yml && \
+    conda clean -a -y
+
+ENV PATH=/root/miniconda3/envs/clipdino/bin:$PATH
+
+RUN pip install --no-cache-dir \
+    torch==1.12.1+cu116 \
+    torchvision==0.13.1+cu116 \
+    --extra-index-url https://download.pytorch.org/whl/cu116
+
+# Copy the CLIP-DINOiser repository
+COPY workspace/projects/clip_dinoiser /tmp/clip_dinoiser
+
+RUN cd /tmp/clip_dinoiser && \
+    pip install -r requirements.txt && \
+    pip install -U openmim && \
+    mim install mmengine && \
+    mim install "mmcv-full==1.6.0" && \
+    mim install "mmsegmentation==0.27.0" && \
+    rm -rf /tmp/clip_dinoiser /tmp/clipdino_env.yml
+RUN pip install "numpy<2" "opencv-python==4.7.0.72"
+
 
 RUN echo "source activate gsam" >> ~/.bashrc
 

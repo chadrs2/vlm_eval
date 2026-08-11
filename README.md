@@ -13,7 +13,8 @@ Workspace for evaluating multiple different VLMs
 ### Conda 
 
 1. When using CLIP-DINOiser, activate the respective conda environment: `$ activate-clipdino`
-2. When using all other models (SAM3, CLIP, Grounding-DINO, Grounded-SAM, and RADIO): `$ activate-main`
+2. When using RADIO, activate the respective conda environment: `$ conda activate radio`
+3. When using all other models (SAM3, CLIP, Grounding-DINO, and Grounded-SAM): `$ conda activate gsam`
 
 ### Hugging Face
 

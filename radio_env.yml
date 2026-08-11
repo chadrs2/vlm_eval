@@ -1,4 +1,4 @@
-name: radio_env
+name: radio
 channels:
   - pytorch
   - nvidia
@@ -15,6 +15,7 @@ dependencies:
   - tqdm
   - pip:
       - torch>=2.5.0
+      - setuptools<81
       - torchvision>=0.20.0
       - transformers>=4.40.0
       - huggingface-hub>=0.21.0
