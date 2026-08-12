@@ -12,6 +12,7 @@ services:
     volumes:
       # Mount workspace directory into /workspace inside container
       - ./workspace:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     deploy:
       resources:
         reservations:
@@ -22,4 +23,5 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0
+      - DISPLAY=${DISPLAY}
     working_dir: /workspace

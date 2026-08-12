@@ -35,6 +35,7 @@ COPY gsam_environment.yml /tmp/environment.yml
 RUN conda env create -f /tmp/environment.yml && \
     conda clean -a -y
 
+# Makes GSAM conda env the default for subsequent RUN commands
 ENV PATH=/root/miniconda3/envs/gsam/bin:$PATH
 ENV CUDA_HOME=/usr/local/cuda
 
@@ -75,13 +76,12 @@ COPY radio_env.yml /tmp/radio_env.yml
 RUN conda env create -f /tmp/radio_env.yml && \
     conda clean -a -y
 
+# Makes RADIO conda env the default for subsequent RUN commands
 ENV PATH=/root/miniconda3/envs/radio/bin:$PATH
 
-# # Copy the RADIO repository
-# COPY workspace/projects/nvidia_radio /tmp/nvidia_radio
-
-# # Install RADIO into the radio environment
-# RUN rm -rf /tmp/nvidia_radio /tmp/radio_env.yml
+RUN pip install --no-cache-dir --force-reinstall \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu121
 
 
 ###################
@@ -93,6 +93,7 @@ COPY clipdino_env.yml /tmp/clipdino_env.yml
 RUN conda env create -f /tmp/clipdino_env.yml && \
     conda clean -a -y
 
+# Makes CLIPDINO conda env the default for subsequent RUN commands
 ENV PATH=/root/miniconda3/envs/clipdino/bin:$PATH
 
 RUN pip install --no-cache-dir \
