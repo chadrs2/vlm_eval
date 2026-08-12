@@ -71,7 +71,7 @@ class NAClipAttention(Attention):
             out = torch.hstack([torch.zeros((dim1 * dim2 + num_cls, num_cls)), v_adjusted])
         return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor = None, is_causal: bool = False) -> torch.Tensor:
         """
         Forward pass for the NAClipAttention.
         """
@@ -84,6 +84,8 @@ class NAClipAttention(Attention):
         if self.fused_attn and self.attn_strategy == 'kkonly':
             x = F.scaled_dot_product_attention(
                 k, k, v,
+                attn_mask=attn_mask,
+                is_causal=is_causal,
                 dropout_p=self.attn_drop.p if self.training else 0.,
             )
         else:
@@ -106,6 +108,28 @@ class NAClipAttention(Attention):
                     self.addition_cache[self.n_patches] = addition
 
                 attn = attn + addition
+
+            # If requested, create or merge a causal mask (upper-triangular) so tokens cannot attend to future tokens
+            if is_causal:
+                causal = torch.triu(torch.ones((N, N), device=x.device, dtype=torch.bool), diagonal=1)
+                causal_mask = torch.zeros((N, N), device=x.device, dtype=attn.dtype if hasattr(attn, 'dtype') else x.dtype)
+                causal_mask = causal_mask.masked_fill(causal, float(-100.0))
+                if attn_mask is None:
+                    attn_mask = causal_mask
+                else:
+                    try:
+                        attn_mask = attn_mask + causal_mask
+                    except Exception:
+                        attn_mask = attn_mask
+
+            # apply attention mask if provided (handles windowed masks shaped like in WindowAttention)
+            if attn_mask is not None:
+                try:
+                    nW = attn_mask.shape[0]
+                    attn = attn.view(B // nW, nW, self.num_heads, N, N) + attn_mask.unsqueeze(1).unsqueeze(0)
+                    attn = attn.view(-1, self.num_heads, N, N)
+                except Exception:
+                    attn = attn + attn_mask
 
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
