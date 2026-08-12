@@ -1,8 +1,8 @@
-models/*
+workspace/models/*
 workspace/models/
 *.pth
 *.pt
 *.ts
 old_files/*
-notebooks/runs/*
-notebooks/weights/*
+workspace/notebooks/runs/*
+workspace/notebooks/weights/*
