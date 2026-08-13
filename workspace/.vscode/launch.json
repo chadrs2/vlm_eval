@@ -14,6 +14,7 @@
                 "gsam",
                 "--image_dataset=/workspace/data/hawaii_test_images/train/",
                 "--output=/workspace/experiments/exp1_text2mask/results/gsam/test",
+                "--model=yoloe"
             ]
         }
     ]

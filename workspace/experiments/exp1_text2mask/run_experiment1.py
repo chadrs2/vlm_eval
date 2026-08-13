@@ -10,7 +10,10 @@ from pycocotools.coco import COCO
 
 
 def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_subset=-1):
-    """Load COCO annotations and return images plus binary masks."""
+    """Load COCO annotations and return images, masks, and file paths.
+
+    Returns: images, masks, class_ids, class_names, category_name_dict, image_paths
+    """
 
     dataset_dir = os.path.abspath(dataset_dir)
 
@@ -31,6 +34,7 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
         cat["id"]: cat["name"]
         for cat in categories
     }
+    category_name_dict = {k: v for k, v in category_names.items() if k not in ignore_ids}
 
     # Get image IDs
     image_ids = coco.getImgIds()
@@ -42,6 +46,7 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
     masks = []
     class_ids = []
     class_names = []
+    image_paths = []
 
     for image_id in image_ids:
 
@@ -56,6 +61,8 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
         image = np.array(
             Image.open(image_path).convert("RGB")
         )
+        # Track the original image filepath
+        image_paths.append(image_path)
 
         image_masks = []
         image_class_ids = []
@@ -90,7 +97,8 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
         class_ids.append(image_class_ids)
         class_names.append(image_class_names)
 
-    return images, masks, class_ids, class_names
+    return images, masks, class_ids, class_names, category_name_dict, image_paths
+
 
 def debug_visualize_random_image(
     images,
@@ -202,12 +210,34 @@ def debug_visualize_random_image(
     plt.tight_layout()
     plt.show()
 
-def run_experiment(images, gt_masks, class_ids, class_names, env="gsam", model="all", output_folder=None):
+def run_experiment(
+    images, 
+    image_paths,
+    gt_masks, 
+    class_ids, 
+    class_names, 
+    category_name_dict, 
+    env="gsam", 
+    model="all", 
+    output_folder=None,
+    batch_size=8
+):
     # Import conda env variables
-    if args.conda_env == "gsam":
+    if env == "gsam":
         import gsam_masks_helper
-        # from gsam_masks_helper import 
-    elif args.conda_env == "clipdino":
+        from gsam_masks_helper import run_experiment1
+        run_experiment1(
+            images,
+            image_paths,
+            gt_masks,
+            class_ids,
+            class_names,
+            category_name_dict,
+            model_name=model,
+            output_folder=output_folder,
+            batch_size=batch_size
+        ) 
+    elif env == "clipdino":
         import clipdino_masks_helper
     else: # "radio"
         import radio_masks_helper
@@ -238,6 +268,10 @@ def arg_parser():
                         type=str,
                         default="all",
                         help="(Optional) Name of VLM model to evaluate if not all [yoloe, clip, siglip, gsam, sam3, radio, clipdino]")
+    parser.add_argument('--batch_size',
+                        type=int,
+                        default=8,
+                        help="Image batch size")
     return parser.parse_args()
 
 
@@ -245,7 +279,7 @@ if __name__ == "__main__":
     args = arg_parser()
     
     # Import conda env variables
-    if args.conda_env != "gsam" or args.conda_env != "clipdino" or args.conda_env != "radio":
+    if args.conda_env != "gsam" and args.conda_env != "clipdino" and args.conda_env != "radio":
         print("Incorrect conda environment name. Should be either [gsam, clipdino, radio]") 
         print("Exiting...")
         exit()
@@ -258,7 +292,7 @@ if __name__ == "__main__":
       
     # Load data
     class_ids_ignore = [0,1,5] # [Hawaii-Database-official, Tristan, ego_vehicle] classes
-    images, masks, class_ids, class_names = load_data(
+    images, masks, class_ids, class_names, cat_name_dict, image_paths = load_data(
         args.image_dataset,
         class_ids_ignore=class_ids_ignore,
         image_subset=args.image_subset,
@@ -274,12 +308,15 @@ if __name__ == "__main__":
     # Execute experiment & save results
     results = run_experiment(
         images, 
+        image_paths,
         masks, 
         class_ids, 
         class_names,
+        cat_name_dict,
         env=args.conda_env, 
         model=args.model,
-        output_folder=output_folder
+        output_folder=output_folder,
+        batch_size=args.batch_size
     )
     
     # TODO: Display results

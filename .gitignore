@@ -1,5 +1,4 @@
 workspace/models/*
-workspace/models/
 *.pth
 *.pt
 *.ts
