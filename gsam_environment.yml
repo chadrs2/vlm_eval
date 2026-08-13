@@ -20,8 +20,6 @@ dependencies:
   - setuptools=83.0.0
   - wheel=0.47.0
   - pip:
-      - torch==2.13.0
-      - torchvision==0.28.0
       - transformers==4.37.2
       - timm==1.0.28
       - diffusers==0.39.0

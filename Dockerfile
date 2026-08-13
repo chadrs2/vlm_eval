@@ -39,6 +39,10 @@ RUN conda env create -f /tmp/environment.yml && \
 ENV PATH=/root/miniconda3/envs/gsam/bin:$PATH
 ENV CUDA_HOME=/usr/local/cuda
 
+RUN pip install --no-cache-dir --force-reinstall \
+    torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
+
 # Build submodules from repository
 COPY workspace/projects/Grounded-Segment-Anything /tmp/Grounded-Segment-Anything
 
@@ -58,13 +62,15 @@ RUN pip install ultralytics
 ############
 RUN pip install sentencepiece protobuf
 
-############################################
-## Fix PyTorch installation for CUDA 12.1 ##
-############################################
-# Activate the gsam environment and reinstall PyTorch compiled for CUDA 12.1
+#################################################
+## Fix PyTorch installation for driver/CUDA 12.9+ ##
+#################################################
+# Activate the gsam environment and reinstall PyTorch compiled for CUDA 12.8
+# (pinned explicitly - "torch" unpinned can silently resolve to a newer
+# cu13x build that your driver doesn't support yet)
 RUN pip install --no-cache-dir --force-reinstall \
-    torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 
 ###########
@@ -80,8 +86,8 @@ RUN conda env create -f /tmp/radio_env.yml && \
 ENV PATH=/root/miniconda3/envs/radio/bin:$PATH
 
 RUN pip install --no-cache-dir --force-reinstall \
-    torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 
 ###################

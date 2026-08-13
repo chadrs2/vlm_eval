@@ -10,4 +10,5 @@ dependencies:
   - jupyter
   - ipykernel
   - setuptools=80.9.0
+  - pycocotools
   - wheel

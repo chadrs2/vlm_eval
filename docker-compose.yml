@@ -9,8 +9,8 @@ services:
     tty: true
     ipc: host
     shm_size: '8gb'
+    runtime: nvidia
     volumes:
-      # Mount workspace directory into /workspace inside container
       - ./workspace:/workspace
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     deploy:
@@ -19,9 +19,9 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [gpu, utility, compute]
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - CUDA_VISIBLE_DEVICES=0
-      - DISPLAY=${DISPLAY}
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=${DISPLAY:-:0}
     working_dir: /workspace

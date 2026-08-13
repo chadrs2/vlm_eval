@@ -1,0 +1,271 @@
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/miniconda3/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    bzip2 \
+    ca-certificates \
+    git \
+    curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    /bin/bash /tmp/miniconda.sh -b -p /root/miniconda3 && \
+    rm /tmp/miniconda.sh && \
+    conda clean -a -y
+
+# Accept Anaconda ToS to prevent channel errors
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
+
+# Force pip to use the legacy dependency resolver inside conda
+RUN /root/miniconda3/bin/pip config set global.use-deprecated legacy-resolver
+
+WORKDIR /workspace
+
+##################################
+## Grounded-SAM + GroundingDINO ##
+##################################
+# Base environment creation
+COPY gsam_environment.yml /tmp/environment.yml
+RUN conda env create -f /tmp/environment.yml && \
+    conda clean -a -y
+
+# Makes GSAM conda env the default for subsequent RUN commands
+ENV PATH=/root/miniconda3/envs/gsam/bin:$PATH
+ENV CUDA_HOME=/usr/local/cuda
+
+#################################################
+## Pin PyTorch to last known-good pre-2.6 build ##
+#################################################
+# torch 2.6+ dropped the deprecated .type()->ScalarType implicit conversion
+# that GroundingDINO's vendored CUDA source relies on, breaking compilation.
+# torch 2.5.1 is the last release published with a cu121 wheel and predates
+# that API removal, so it compiles GroundingDINO's extension unmodified.
+# Your driver (CUDA 12.9 max) is backward-compatible with cu121 binaries.
+RUN pip install --no-cache-dir --force-reinstall \
+    torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Build submodules from repository
+COPY workspace/projects/Grounded-Segment-Anything /tmp/Grounded-Segment-Anything
+
+# `docker build` has no GPU access (GPU passthrough only happens at container
+# runtime via docker-compose's deploy.resources block), so GroundingDINO's
+# setup.py would normally see torch.cuda.is_available() == False and skip
+# compiling the CUDA extension (_C) entirely - that's why it's undefined at
+# runtime. FORCE_CUDA=1 makes it compile the CUDA kernels anyway, and
+# TORCH_CUDA_ARCH_LIST is required because it can't auto-detect your GPU's
+# compute capability without a live device. Adjust the arch list below to
+# match your GPU if you know it, for a faster build.
+ENV FORCE_CUDA=1
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0+PTX"
+
+RUN cd /tmp/Grounded-Segment-Anything/GroundingDINO && \
+    pip install --no-build-isolation -e . && \
+    cd /tmp/Grounded-Segment-Anything/segment_anything && \
+    pip install -e . && \
+    rm -rf /tmp/Grounded-Segment-Anything
+
+##################################
+## SAM 3, YOLO-E, CLIP, FastSAM ##
+##################################
+RUN pip install ultralytics
+
+############
+## SigLIP ##
+############
+RUN pip install sentencepiece protobuf
+
+
+###########
+## RADIO ##
+###########
+# Create the RADIO conda environment
+COPY radio_env.yml /tmp/radio_env.yml
+
+RUN conda env create -f /tmp/radio_env.yml && \
+    conda clean -a -y
+
+# Makes RADIO conda env the default for subsequent RUN commands
+ENV PATH=/root/miniconda3/envs/radio/bin:$PATH
+
+RUN pip install --no-cache-dir --force-reinstall \
+    torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+
+###################
+## CLIP-DINOiser ##
+###################
+# Base environment creation
+COPY clipdino_env.yml /tmp/clipdino_env.yml
+
+RUN conda env create -f /tmp/clipdino_env.yml && \
+    conda clean -a -y
+
+# Makes CLIPDINO conda env the default for subsequent RUN commands
+ENV PATH=/root/miniconda3/envs/clipdino/bin:$PATH
+
+RUN pip install --no-cache-dir \
+    torch==1.12.1+cu116 \
+    torchvision==0.13.1+cu116 \
+    --extra-index-url https://download.pytorch.org/whl/cu116
+
+# Copy the CLIP-DINOiser repository
+COPY workspace/projects/clip_dinoiser /tmp/clip_dinoiser
+
+RUN cd /tmp/clip_dinoiser && \
+    pip install -r requirements.txt && \
+    pip install -U openmim && \
+    mim install mmengine && \
+    mim install "mmcv-full==1.6.0" && \
+    mim install "mmsegmentation==0.27.0" && \
+    rm -rf /tmp/clip_dinoiser /tmp/clipdino_env.yml
+RUN pip install "numpy<2" "opencv-python==4.7.0.72"
+
+
+RUN echo "source activate gsam" >> ~/.bashrc
+
+# COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
+
+
+
+
+
+
+
+
+
+
+
+# FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+# ENV DEBIAN_FRONTEND=noninteractive
+# ENV PATH="/root/miniconda3/bin:${PATH}"
+
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     wget \
+#     bzip2 \
+#     ca-certificates \
+#     git \
+#     curl \
+#     libgl1-mesa-glx \
+#     libglib2.0-0 \
+#     && rm -rf /var/lib/apt/lists/*
+
+# RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+#     /bin/bash /tmp/miniconda.sh -b -p /root/miniconda3 && \
+#     rm /tmp/miniconda.sh && \
+#     conda clean -a -y
+
+# # Accept Anaconda ToS to prevent channel errors
+# RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true && \
+#     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
+
+# # Force pip to use the legacy dependency resolver inside conda
+# RUN /root/miniconda3/bin/pip config set global.use-deprecated legacy-resolver
+
+# WORKDIR /workspace
+
+# ##################################
+# ## Grounded-SAM + GroundingDINO ##
+# ##################################
+# # Base environment creation
+# COPY gsam_environment.yml /tmp/environment.yml
+# RUN conda env create -f /tmp/environment.yml && \
+#     conda clean -a -y
+
+# # Makes GSAM conda env the default for subsequent RUN commands
+# ENV PATH=/root/miniconda3/envs/gsam/bin:$PATH
+# ENV CUDA_HOME=/usr/local/cuda
+
+# # Build submodules from repository
+# COPY workspace/projects/Grounded-Segment-Anything /tmp/Grounded-Segment-Anything
+
+# RUN cd /tmp/Grounded-Segment-Anything/GroundingDINO && \
+#     pip install --no-build-isolation -e . && \
+#     cd /tmp/Grounded-Segment-Anything/segment_anything && \
+#     pip install -e . && \
+#     rm -rf /tmp/Grounded-Segment-Anything
+
+# ##################################
+# ## SAM 3, YOLO-E, CLIP, FastSAM ##
+# ##################################
+# RUN pip install ultralytics
+
+# ############
+# ## SigLIP ##
+# ############
+# RUN pip install sentencepiece protobuf
+
+# #################################################
+# ## Fix PyTorch installation for driver/CUDA 12.9+ ##
+# #################################################
+# # Activate the gsam environment and reinstall PyTorch compiled for CUDA 12.8
+# # (pinned explicitly - "torch" unpinned can silently resolve to a newer
+# # cu13x build that your driver doesn't support yet)
+# RUN pip install --no-cache-dir --force-reinstall \
+#     torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+#     --index-url https://download.pytorch.org/whl/cu128
+
+
+# ###########
+# ## RADIO ##
+# ###########
+# # Create the RADIO conda environment
+# COPY radio_env.yml /tmp/radio_env.yml
+
+# RUN conda env create -f /tmp/radio_env.yml && \
+#     conda clean -a -y
+
+# # Makes RADIO conda env the default for subsequent RUN commands
+# ENV PATH=/root/miniconda3/envs/radio/bin:$PATH
+
+# RUN pip install --no-cache-dir --force-reinstall \
+#     torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 \
+#     --index-url https://download.pytorch.org/whl/cu128
+
+
+# ###################
+# ## CLIP-DINOiser ##
+# ###################
+# # Base environment creation
+# COPY clipdino_env.yml /tmp/clipdino_env.yml
+
+# RUN conda env create -f /tmp/clipdino_env.yml && \
+#     conda clean -a -y
+
+# # Makes CLIPDINO conda env the default for subsequent RUN commands
+# ENV PATH=/root/miniconda3/envs/clipdino/bin:$PATH
+
+# RUN pip install --no-cache-dir \
+#     torch==1.12.1+cu116 \
+#     torchvision==0.13.1+cu116 \
+#     --extra-index-url https://download.pytorch.org/whl/cu116
+
+# # Copy the CLIP-DINOiser repository
+# COPY workspace/projects/clip_dinoiser /tmp/clip_dinoiser
+
+# RUN cd /tmp/clip_dinoiser && \
+#     pip install -r requirements.txt && \
+#     pip install -U openmim && \
+#     mim install mmengine && \
+#     mim install "mmcv-full==1.6.0" && \
+#     mim install "mmsegmentation==0.27.0" && \
+#     rm -rf /tmp/clip_dinoiser /tmp/clipdino_env.yml
+# RUN pip install "numpy<2" "opencv-python==4.7.0.72"
+
+
+# RUN echo "source activate gsam" >> ~/.bashrc
+
+
+# CMD ["bash"]
