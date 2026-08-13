@@ -220,7 +220,8 @@ def run_experiment(
     env="gsam", 
     model="all", 
     output_folder=None,
-    batch_size=8
+    batch_size=8,
+    device="cuda:0"
 ):
     # Import conda env variables
     if env == "gsam":
@@ -235,7 +236,8 @@ def run_experiment(
             category_name_dict,
             model_name=model,
             output_folder=output_folder,
-            batch_size=batch_size
+            batch_size=batch_size,
+            device=device
         ) 
     elif env == "clipdino":
         import clipdino_masks_helper
@@ -271,7 +273,11 @@ def arg_parser():
     parser.add_argument('--batch_size',
                         type=int,
                         default=8,
-                        help="Image batch size")
+                        help="(Optional) Image batch size")
+    parser.add_argument('--device',
+                        type=str,
+                        default="cuda:0",
+                        help="Device to run models on [cuda:0, cpu]")
     return parser.parse_args()
 
 
@@ -316,7 +322,8 @@ if __name__ == "__main__":
         env=args.conda_env, 
         model=args.model,
         output_folder=output_folder,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        device=args.device
     )
     
     # TODO: Display results
