@@ -304,24 +304,39 @@ if __name__ == "__main__":
     # Custom Evaluation Settings
     # ---------------------------------------------------------
     
-    void_class_ids = [1, 6] 
+    void_class_ids = []
+    # void_class_ids = [1, 5] # test IDs
+    # void_class_ids = [1, 6] # full Hawaii dataset IDS
     
     # Load data
     # (Do NOT ignore 1 and 6 during load_data, so their ground truth is available for void subtraction!)
-    class_ids_ignore = [0] # Hawaii-Database-official 
+    # class_ids_ignore = [0] # Hawaii-Database-official 
+    class_ids_ignore = [0,1,5] # Hawaii-Database-official 
     
     custom_prompts = [
-        "vegetation",
-        "boat", "car",
+        "bridge",
+        "building",
+        "car",
+        "mountain",
         "person",
-        "buoy", "building",
-        "piling",
-        "water", "mountain", "sky",
-        "gangway", "bridge",
-        "float", "pier", "wharf",
-        "shore-natural", "shore-artificial"
-
+        "pier",
+        "shore-artificial",
+        "sky",
+        "vegetation",
+        "water",  
     ]
+    # custom_prompts = [
+    #     "vegetation",
+    #     "boat", 
+    #     "car",
+    #     "person",
+    #     "buoy", "building",
+    #     "piling",
+    #     "water", "mountain", "sky",
+    #     "gangway", "bridge",
+    #     "float", "pier", "wharf",
+    #     "shore-natural", "shore-artificial"
+    # ]
     
     images, masks, class_ids, class_names, cat_name_dict, image_paths = load_data(
         args.image_dataset,

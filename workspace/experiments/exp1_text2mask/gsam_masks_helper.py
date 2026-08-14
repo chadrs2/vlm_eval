@@ -82,10 +82,16 @@ def load_gsam(all_class_names, device):
     return [groundingdino_model, sam_predictor]
 
 def load_clip(all_class_names, device):
-    return
+    fastsam_model = FastSAM(model="FastSAM-s.pt")
+    clip_model = CLIP(size="ViT-B/32", device=device)
+    return [fastsam_model, clip_model]
 
 def load_siglip(all_class_names, device):
-    return
+    fastsam_model = FastSAM(model="FastSAM-s.pt")
+    model_id = "google/siglip-base-patch16-224"
+    siglip_processor = AutoProcessor.from_pretrained(model_id)
+    siglip_model = AutoModel.from_pretrained(model_id).to(device)
+    return [fastsam_model, siglip_processor, siglip_model]
 
 LOAD_MODEL_ENUM = {
     "yoloe": load_yoloe,
@@ -103,13 +109,17 @@ def load_models(model_name, all_class_names, device="cuda:0"):
             models[am] = LOAD_MODEL_ENUM[am](all_class_names, device)
     return models
 
+
 def predict_yoloe(model, images, gt_class_ids, device):
     
-    results = model.predict(images)
+    results = model.predict(images, conf=0.1)
     
     batch_masks = []
     
     for image, result in zip(images, results):
+        # annotated_img = result.plot()
+        # plt.imshow(annotated_img)
+        # plt.show()
         IMG_W, IMG_H = image.shape[1], image.shape[0]
         
         masks = {}
@@ -137,6 +147,7 @@ def predict_yoloe(model, images, gt_class_ids, device):
         batch_masks.append(masks)
     
     return batch_masks
+
 
 def predict_sam3(model, images, gt_class_ids, gt_class_names, device):
     batch_masks = []
@@ -167,6 +178,7 @@ def predict_sam3(model, images, gt_class_ids, gt_class_names, device):
         batch_masks.append(masks)
         
     return batch_masks
+
         
 def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
     TEXT_PROMPT = " . ".join(gt_class_names)
@@ -226,6 +238,207 @@ def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
         batch_masks.append(masks)
                 
     return batch_masks
+
+
+def _get_fsam_masks(fsam_model, images, device):
+    all_img_masks = []
+    all_fsam_masks = []
+    IMG_W, IMG_H = images[0].shape[1], images[0].shape[0]
+    fsam_results = fsam_model(
+        images,
+        device=device,
+        retina_masks=True,
+        imgsz=(IMG_H, IMG_W),
+        conf=0.003,
+        iou=0.25,
+        max_det=100,
+    )
+    
+    buffer = 10
+    kernel = np.ones((5, 5), np.uint8)
+    for image, result in zip(images, fsam_results):
+        fsam_masks = result.masks.data.bool()
+        all_fsam_masks.append(fsam_masks)
+        
+        img_masks = []
+        for mask in fsam_masks:
+            mask_bool = (mask.cpu().numpy() > 0)
+            if mask_bool.sum() == 0:
+                continue
+    
+            # bounding box and dilation
+            mask_u8 = (mask_bool.astype(np.uint8) * 255)
+            x, y, w, h = cv2.boundingRect(mask_u8)
+            x1, y1 = max(0, x - buffer), max(0, y - buffer)
+            x2, y2 = min(IMG_W, x + w + buffer), min(IMG_H, y + h + buffer)
+    
+    
+            dilated = cv2.dilate(mask_u8, kernel, iterations=3).astype(bool)
+            if not dilated.any():
+                continue
+    
+            # crop and zero-out background inside crop
+            cropped_bb = image[y1:y2, x1:x2].copy()
+            roi = dilated[y1:y2, x1:x2]
+            cropped_bb[~roi] = 0
+            try:
+                pil_crop = Image.fromarray(cropped_bb)
+            except Exception:
+                pil_crop = Image.fromarray((np.clip(cropped_bb, 0, 255)).astype(np.uint8))
+    
+            img_masks.append(pil_crop)
+        
+        all_img_masks.append(img_masks)
+    
+    return all_img_masks, all_fsam_masks
+
+
+def _get_clip_mask_embs(fsam_model, clip_model, images, device):
+    clip_mask_embs = []
+    
+    all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
+    
+    for img_masks in all_img_masks:
+        # preprocess and batch for CLIP
+        preprocessed = [clip_model.image_preprocess(img).unsqueeze(0) for img in img_masks]
+        clip_input_batch = torch.cat(preprocessed, dim=0).to(device, non_blocking=True)
+
+        with torch.no_grad():
+            fsam_clip_embs_tensor = clip_model.encode_image(clip_input_batch)
+        clip_mask_embs.append(fsam_clip_embs_tensor)
+    return clip_mask_embs, all_fsam_masks
+
+def predict_clip(model, images, gt_class_ids, gt_class_names, device):
+    clip_mask_embs, all_fsam_masks = _get_clip_mask_embs(model[0], model[1], images, device)
+    toks = model[1].tokenize(gt_class_names)
+    clip_txt_embs = model[1].encode_text(toks)
+    
+    COSSIM_THRESHOLD = 0.25
+    batch_masks = []
+    for img_idx in range(len(images)):
+        IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
+        similarity = F.cosine_similarity(
+            clip_mask_embs[img_idx].unsqueeze(1), 
+            clip_txt_embs.unsqueeze(0), 
+            dim=-1
+        )
+
+        merged_masks = {}
+        for c_idx, class_name in enumerate(gt_class_names):
+            gt_class_id = gt_class_ids[c_idx]
+            
+            class_sims = similarity[:, c_idx]
+            
+            passing_indices = (class_sims > COSSIM_THRESHOLD).nonzero(as_tuple=True)[0]
+                
+            if len(passing_indices) == 0:
+                continue
+        
+            # Extract masks above threshold: shape [K, H, W]
+            selected_masks = all_fsam_masks[img_idx][passing_indices]
+            
+            # Merge selected masks along dimension 0 using bitwise OR
+            combined_mask = selected_masks.any(dim=0)  # Equivalent to bitwise OR reduction across mask axis
+            
+            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
+            mask_resized = cv2.resize(
+                mask_np, 
+                (IMG_W, IMG_H), 
+                interpolation=cv2.INTER_NEAREST
+            )
+
+            if gt_class_id in merged_masks:
+                merged_masks[gt_class_id].append(mask_resized)
+            else:
+                merged_masks[gt_class_id] = [mask_resized]
+    
+        batch_masks.append(merged_masks)
+        
+    return batch_masks
+
+
+def _get_siglip_mask_embs(fsam_model, siglip_processor, siglip_model, images, device):
+    siglip_mask_embs = []
+    
+    all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
+    
+    for img_masks in all_img_masks:
+        # preprocess and batch for SigLIP
+        image_inputs = siglip_processor(
+            images=img_masks, 
+            return_tensors="pt", 
+            padding="max_length"
+        ).to(device)
+        with torch.no_grad():
+            image_embeds = siglip_model.get_image_features(**image_inputs)
+            image_embeds = F.normalize(image_embeds, p=2, dim=-1)
+            
+        siglip_mask_embs.append(image_embeds)
+    
+    return siglip_mask_embs, all_fsam_masks
+
+def predict_siglip(model, images, gt_class_ids, gt_class_names, device):
+    siglip_mask_embs, all_fsam_masks = _get_siglip_mask_embs(
+        model[0], # fastsam 
+        model[1], # processor
+        model[2], # model
+        images, 
+        device
+    )
+    
+    text_inputs = model[1](
+        text=gt_class_names, 
+        return_tensors="pt", 
+        padding="max_length"
+    ).to(device)
+    with torch.no_grad():
+        siglip_text_embeds = model[2].get_text_features(**text_inputs)
+        siglip_text_embeds = F.normalize(siglip_text_embeds, p=2, dim=-1)
+    
+    
+    COSSIM_THRESHOLD = 0.06
+    batch_masks = []
+    for img_idx in range(len(images)):
+        IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
+        similarity = F.cosine_similarity(
+            siglip_mask_embs[img_idx].unsqueeze(1), 
+            siglip_text_embeds.unsqueeze(0), 
+            dim=-1
+        )
+
+        merged_masks = {}
+        for c_idx, class_name in enumerate(gt_class_names):
+            gt_class_id = gt_class_ids[c_idx]
+            
+            class_sims = similarity[:, c_idx]
+            
+            passing_indices = (class_sims > COSSIM_THRESHOLD).nonzero(as_tuple=True)[0]
+                
+            if len(passing_indices) == 0:
+                continue
+        
+            # Extract masks above threshold: shape [K, H, W]
+            selected_masks = all_fsam_masks[img_idx][passing_indices]
+            
+            # Merge selected masks along dimension 0 using bitwise OR
+            combined_mask = selected_masks.any(dim=0)  # Equivalent to bitwise OR reduction across mask axis
+            
+            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
+            mask_resized = cv2.resize(
+                mask_np, 
+                (IMG_W, IMG_H), 
+                interpolation=cv2.INTER_NEAREST
+            )
+
+            if gt_class_id in merged_masks:
+                merged_masks[gt_class_id].append(mask_resized)
+            else:
+                merged_masks[gt_class_id] = [mask_resized]
+    
+        batch_masks.append(merged_masks)
+        
+    return batch_masks
+    
 
 
 def run_experiment1(
@@ -303,6 +516,22 @@ def run_experiment1(
                 batch_masks = predict_gsam(
                     model,
                     batch_image_paths,
+                    eval_class_ids,
+                    eval_class_names,
+                    device
+                )
+            elif model_name == "clip":
+                batch_masks = predict_clip(
+                    model,
+                    batch_images,
+                    eval_class_ids,
+                    eval_class_names,
+                    device
+                )
+            elif model_name == "siglip":
+                batch_masks = predict_siglip(
+                    model,
+                    batch_images,
                     eval_class_ids,
                     eval_class_names,
                     device

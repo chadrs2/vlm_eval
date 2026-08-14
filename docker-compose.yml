@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: frostlab/vision_foundation_models:cu129
+    image: vision_foundation_models:latest
     container_name: vision_foundation_models_dev
     stdin_open: true
     tty: true
