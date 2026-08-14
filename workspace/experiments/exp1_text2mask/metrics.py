@@ -1,8 +1,6 @@
 import csv
 import numpy as np
 
-# from sklearn.metrics import average_precision_score
-
 
 def _build_semantic_masks(
     pred_masks,
@@ -10,35 +8,17 @@ def _build_semantic_masks(
     gt_class_ids,
     image_shape,
     class_ids,
+    void_class_ids=None
 ):
     """
     Convert instance masks into per-class binary semantic masks.
-
-    Args:
-        pred_masks:
-            Dict:
-                {
-                    class_id: [mask1, mask2, ...]
-                }
-
-        gt_masks:
-            List of GT instance masks.
-
-        image_shape:
-            (H, W)
-
-        class_ids:
-            GT class ID corresponding to each mask in gt_masks.
-
-    Returns:
-        pred_semantic:
-            Dict[class_id] -> binary HxW mask
-
-        gt_semantic:
-            Dict[class_id] -> binary HxW mask
     """
 
     H, W = image_shape
+
+    build_ids = set(class_ids)
+    if void_class_ids is not None:
+        build_ids.update(void_class_ids)
 
     pred_semantic = {
         class_id: np.zeros((H, W), dtype=bool)
@@ -47,7 +27,7 @@ def _build_semantic_masks(
 
     gt_semantic = {
         class_id: np.zeros((H, W), dtype=bool)
-        for class_id in class_ids
+        for class_id in build_ids
     }
 
     # ---------------------------------------------------------
@@ -81,10 +61,7 @@ def _build_semantic_masks(
     for mask, class_id in zip(gt_masks, gt_class_ids):
 
         if class_id not in gt_semantic:
-            gt_semantic[class_id] = np.zeros(
-                (H, W),
-                dtype=bool
-            )
+            continue
 
         mask = mask.astype(bool)
 
@@ -102,13 +79,19 @@ def _build_semantic_masks(
 def _compute_confusion(
     pred_mask,
     gt_mask,
+    void_mask=None
 ):
     """
-    Compute pixel-level TP, FP, FN, TN.
+    Compute pixel-level TP, FP, FN, TN, factoring out void areas.
     """
 
     pred_mask = pred_mask.astype(bool)
     gt_mask = gt_mask.astype(bool)
+
+    if void_mask is not None:
+        valid_mask = ~void_mask.astype(bool)
+        pred_mask = pred_mask & valid_mask
+        gt_mask = gt_mask & valid_mask
 
     tp = np.logical_and(pred_mask, gt_mask).sum()
     fp = np.logical_and(pred_mask, ~gt_mask).sum()
@@ -128,9 +111,6 @@ def _save_accumulator_csv(
 ):
     """
     Save the current accumulated TP/FP/FN/TN values to CSV.
-
-    This is primarily useful for monitoring evaluation progress
-    while batches are being processed.
     """
 
     fieldnames = [
@@ -152,7 +132,6 @@ def _save_accumulator_csv(
 
         for class_id, stats in accumulator.items():
 
-            # Skip metadata entries such as "_runtime"
             if not isinstance(class_id, (int, np.integer)):
                 continue
 
@@ -170,52 +149,13 @@ def evaluate_batch(
     batch_class_ids,
     batch_images,
     class_ids,
+    void_class_ids=None,
     accumulator=None,
     runtime=None,
     csv_path=None,
 ):
     """
-    Evaluate one batch of predictions.
-
-    This function accumulates pixel-level TP/FP/FN/TN across
-    images so that metrics can be computed over the entire
-    dataset.
-
-    Args:
-        batch_masks:
-            List of prediction dictionaries, one per image.
-
-            Example:
-                [
-                    {
-                        2: [mask1, mask2],
-                        7: [mask3],
-                    },
-                    ...
-                ]
-
-        batch_gt_masks:
-            List of GT instance-mask lists, one per image.
-
-        batch_class_ids:
-            List of GT class-ID lists, one per image.
-
-        batch_images:
-            List of images.
-
-        class_ids:
-            All class IDs being evaluated.
-
-        accumulator:
-            Existing accumulator returned by this function.
-            Pass None for the first batch.
-
-        runtime:
-            Runtime in seconds for generating this batch's
-            predictions.
-
-    Returns:
-        accumulator
+    Evaluate one batch of predictions with void subtraction.
     """
 
     if accumulator is None:
@@ -264,11 +204,18 @@ def evaluate_batch(
             gt_class_ids=gt_class_ids,
             image_shape=(H, W),
             class_ids=class_ids,
+            void_class_ids=void_class_ids
         )
+        
+        # Build composite void mask
+        void_mask = np.zeros((H, W), dtype=bool)
+        if void_class_ids is not None:
+            for v_id in void_class_ids:
+                if v_id in gt_semantic:
+                    void_mask |= gt_semantic[v_id]
 
         for class_id in class_ids:
 
-            # Make sure both masks exist
             pred_mask = pred_semantic.get(
                 class_id,
                 np.zeros((H, W), dtype=bool)
@@ -282,6 +229,7 @@ def evaluate_batch(
             stats = _compute_confusion(
                 pred_mask,
                 gt_mask,
+                void_mask=void_mask
             )
 
             accumulator[class_id]["TP"] += stats["TP"]
@@ -305,26 +253,6 @@ def finalize_evaluation(
 ):
     """
     Compute final dataset-level metrics from an accumulator.
-
-    Returns:
-        results dictionary containing:
-
-            per_class:
-                {
-                    class_id: {
-                        "class_name": ...,
-                        "TP": ...,
-                        "FP": ...,
-                        "FN": ...,
-                        "TN": ...,
-                        "IoU": ...,
-                    }
-                }
-
-            mIoU
-            F-mIoU
-            AP
-            average_runtime
     """
 
     per_class = {}
@@ -419,7 +347,7 @@ def finalize_evaluation(
         "per_class": per_class,
         "mIoU": miou,
         "Mean_F1": mf1_score,
-        "AP": np.nan,  # Requires confidence scores
+        "AP": np.nan,  
         "average_runtime": average_runtime,
         "total_runtime": runtime_info["total"],
         "num_images": runtime_info["num_images"],
