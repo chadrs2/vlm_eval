@@ -11,10 +11,10 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "gsam",
+                "radio",
                 "--image_dataset=/workspace/data/hawaii_test_images/train/",
-                "--output=/workspace/experiments/exp1_text2mask/results/gsam/test",
-                "--model=siglip",
+                "--output=/workspace/experiments/exp1_text2mask/results/radio/test",
+                "--model=radio",
                 "--device=cuda:0"
             ]
         }

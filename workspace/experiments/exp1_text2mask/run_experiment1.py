@@ -245,10 +245,38 @@ def run_experiment(
         ) 
     elif env == "clipdino":
         import clipdino_masks_helper
+        from clipdino_masks_helper import run_experiment1
+        run_experiment1(
+            images,
+            image_paths,
+            gt_masks,
+            class_ids,
+            class_names,
+            category_name_dict,
+            model_name=model,
+            output_folder=output_folder,
+            batch_size=batch_size,
+            device=device,
+            custom_prompts=custom_prompts,
+            void_class_ids=void_class_ids
+        )    
     else: # "radio"
         import radio_masks_helper
-    
-    
+        from radio_masks_helper import run_experiment1
+        run_experiment1(
+            images,
+            image_paths,
+            gt_masks,
+            class_ids,
+            class_names,
+            category_name_dict,
+            model_name=model,
+            output_folder=output_folder,
+            batch_size=batch_size,
+            device=device,
+            custom_prompts=custom_prompts,
+            void_class_ids=void_class_ids
+        )    
     pass
 
 
