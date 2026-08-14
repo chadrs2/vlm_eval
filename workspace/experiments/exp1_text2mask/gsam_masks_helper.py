@@ -73,9 +73,10 @@ def _load_model_hf(repo_id, filename, ckpt_config_filename, device='cpu'):
 def load_gsam(all_class_names, device):
     # Load Grounding-DINO
     ckpt_repo_id = "ShilongLiu/GroundingDINO"
-    ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
-    ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
-    groundingdino_model = _load_model_hf(ckpt_repo_id, ckpt_filenmae, ckpt_config_filename, device=device)
+    ckpt_filename = "groundingdino_swin_t_cogcoor.pth"
+    ckpt_config_filename = "GroundingDINO_SwinT.cfg.py"
+    groundingdino_model = _load_model_hf(ckpt_repo_id, ckpt_filename, ckpt_config_filename, device=device)
+    # Load SAM
     sam_checkpoint = '/workspace/models/sam_vit_b_01ec64.pth' # https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
     sam = build_sam_vit_b(checkpoint=sam_checkpoint)
     sam.to(device=device)
@@ -83,8 +84,10 @@ def load_gsam(all_class_names, device):
     return [groundingdino_model, sam_predictor]
 
 def load_clip(all_class_names, device):
-    fastsam_model = FastSAM(model="FastSAM-s.pt")
+    # Load CLIP
     clip_model = CLIP(size="ViT-B/32", device=device)
+    # Load FastSAM
+    fastsam_model = FastSAM(model="FastSAM-s.pt")
     return [fastsam_model, clip_model]
 
 def load_siglip(all_class_names, device):
