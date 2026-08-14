@@ -221,7 +221,9 @@ def run_experiment(
     model="all", 
     output_folder=None,
     batch_size=8,
-    device="cuda:0"
+    device="cuda:0",
+    custom_prompts=None,
+    void_class_ids=None
 ):
     # Import conda env variables
     if env == "gsam":
@@ -237,7 +239,9 @@ def run_experiment(
             model_name=model,
             output_folder=output_folder,
             batch_size=batch_size,
-            device=device
+            device=device,
+            custom_prompts=custom_prompts,
+            void_class_ids=void_class_ids
         ) 
     elif env == "clipdino":
         import clipdino_masks_helper
@@ -296,8 +300,29 @@ if __name__ == "__main__":
     else:
         os.makedirs(output_folder,exist_ok=True)
       
+    # ---------------------------------------------------------
+    # Custom Evaluation Settings
+    # ---------------------------------------------------------
+    
+    void_class_ids = [1, 6] 
+    
     # Load data
-    class_ids_ignore = [0,1,5] # [Hawaii-Database-official, Tristan, ego_vehicle] classes
+    # (Do NOT ignore 1 and 6 during load_data, so their ground truth is available for void subtraction!)
+    class_ids_ignore = [0] # Hawaii-Database-official 
+    
+    custom_prompts = [
+        "vegetation",
+        "boat", "car",
+        "person",
+        "buoy", "building",
+        "piling",
+        "water", "mountain", "sky",
+        "gangway", "bridge",
+        "float", "pier", "wharf",
+        "shore-natural", "shore-artificial"
+
+    ]
+    
     images, masks, class_ids, class_names, cat_name_dict, image_paths = load_data(
         args.image_dataset,
         class_ids_ignore=class_ids_ignore,
@@ -323,7 +348,9 @@ if __name__ == "__main__":
         model=args.model,
         output_folder=output_folder,
         batch_size=args.batch_size,
-        device=args.device
+        device=args.device,
+        custom_prompts=custom_prompts,
+        void_class_ids=void_class_ids
     )
     
     # TODO: Display results

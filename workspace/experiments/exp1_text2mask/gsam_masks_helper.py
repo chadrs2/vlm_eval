@@ -205,9 +205,9 @@ def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
 
         masks = {}
         for mask, text in zip(gsam_masks, phrases):
-            if " " in text:
-                split_text = text.split(" ")
-                for st in split_text:
+            words = text.split(" ") if " " in text else [text]
+            for st in words:
+                if st in gt_class_names:
                     class_idx = gt_class_names.index(st)
                     gt_class_id = gt_class_ids[class_idx]
                     
@@ -222,21 +222,6 @@ def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
                         masks[gt_class_id].append(mask_resized)
                     else:
                         masks[gt_class_id] = [mask_resized]
-            else:
-                class_idx = gt_class_names.index(text)
-                gt_class_id = gt_class_ids[class_idx]
-                
-                mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-                mask_resized = cv2.resize(
-                    mask_np, 
-                    (IMG_W, IMG_H), 
-                    interpolation=cv2.INTER_NEAREST
-                )
-
-                if gt_class_id in masks:
-                    masks[gt_class_id].append(mask_resized)
-                else:
-                    masks[gt_class_id] = [mask_resized]
         
         batch_masks.append(masks)
                 
@@ -253,12 +238,34 @@ def run_experiment1(
     model_name, 
     output_folder, 
     batch_size=8,
-    device="cuda:0"
+    device="cuda:0",
+    custom_prompts=None,
+    void_class_ids=None
 ):
-    all_class_ids = [k for k, v in category_name_dict.items()]
-    all_class_names = [v for k, v in category_name_dict.items()]
-    models = load_models(model_name, all_class_names, device)
-    
+
+    if custom_prompts is None:
+        custom_prompts = ["boat", "person", "shore"]
+        
+    name_to_id = {v: k for k, v in category_name_dict.items()}
+    eval_category_dict = {}
+    eval_class_ids = []
+    eval_class_names = []
+
+    # Map prompts to GT IDs, generating negative IDs for prompts without GT
+    neg_id_counter = -1
+    for prompt in custom_prompts:
+        if prompt in name_to_id:
+            prompt_id = name_to_id[prompt]
+        else:
+            prompt_id = neg_id_counter
+            neg_id_counter -= 1
+        
+        eval_category_dict[prompt_id] = prompt
+        eval_class_ids.append(prompt_id)
+        eval_class_names.append(prompt)
+
+    models = load_models(model_name, eval_class_names, device)
+
     for model_name, model in models.items():
         print(f"Running {model_name}...")
         
@@ -281,23 +288,23 @@ def run_experiment1(
                 batch_masks = predict_yoloe(
                     model,
                     batch_images,
-                    all_class_ids,
+                    eval_class_ids,
                     device
                 )
             elif model_name == "sam3":
                 batch_masks = predict_sam3(
                     model,
                     batch_images,
-                    all_class_ids,
-                    all_class_names,
+                    eval_class_ids,
+                    eval_class_names,
                     device
                 )
             elif model_name == "gsam":
                 batch_masks = predict_gsam(
                     model,
                     batch_image_paths,
-                    all_class_ids,
-                    all_class_names,
+                    eval_class_ids,
+                    eval_class_names,
                     device
                 )
             runtime = time.perf_counter() - start_time
@@ -308,7 +315,8 @@ def run_experiment1(
                 batch_gt_masks=batch_gt_masks,
                 batch_class_ids=batch_class_ids,
                 batch_images=batch_images,
-                class_ids=all_class_ids,
+                class_ids=eval_class_ids,
+                void_class_ids=void_class_ids,
                 accumulator=evaluation,
                 runtime=runtime,
             )
@@ -319,14 +327,13 @@ def run_experiment1(
         if output_folder:
             results = finalize_evaluation(
                 evaluation,
-                category_name_dict,
+                eval_category_dict,
                 csv_path=os.path.join(output_folder,f"{model_name}_final_results.csv"),
             )
         else:
             results = finalize_evaluation(
                 evaluation,
-                category_name_dict,
+                eval_category_dict,
             )
 
         print_evaluation_results(results)
-            

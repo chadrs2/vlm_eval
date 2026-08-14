@@ -6,4 +6,5 @@ old_files/*
 workspace/notebooks/runs/*
 workspace/notebooks/weights/*
 workspace/data/*
+workspace/Datasets/*
 __pycache__/
