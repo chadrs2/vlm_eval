@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import cv2
 from torchvision.ops import box_convert
+import gc
 
 from transformers import AutoProcessor, AutoModel
 from ultralytics import settings
@@ -100,15 +101,6 @@ LOAD_MODEL_ENUM = {
     "clip": load_clip,
     "siglip": load_siglip
 }
-
-def load_models(model_name, all_class_names, device="cuda:0"):
-    available_models = ["yoloe", "sam3", "gsam", "clip", "siglip"]
-    models = {}
-    for am in available_models:
-        if am == model_name or model_name == "all":
-            models[am] = LOAD_MODEL_ENUM[am](all_class_names, device)
-    return models
-
 
 def predict_yoloe(model, images, gt_class_ids, device):
     
@@ -476,11 +468,19 @@ def run_experiment1(
         eval_category_dict[prompt_id] = prompt
         eval_class_ids.append(prompt_id)
         eval_class_names.append(prompt)
-
-    models = load_models(model_name, eval_class_names, device)
-
-    for model_name, model in models.items():
-        print(f"Running {model_name}...")
+    
+    available_models = ["yoloe", "sam3", "gsam", "clip", "siglip"]
+    if model_name != "all" and model_name not in available_models:
+        print(f"Model not available. Choose from {available_models}.")
+        exit()
+    elif model_name != "all":
+        available_models = [model_name]
+    
+    for available_model_name in available_models:
+        
+        model = LOAD_MODEL_ENUM[available_model_name](eval_class_names, device)
+        
+        print(f"Running {available_model_name}...")
         
         evaluation = None
         
@@ -497,14 +497,14 @@ def run_experiment1(
             batch_class_ids = class_ids[start_idx:end_idx]
             
             start_time = time.perf_counter()
-            if model_name == "yoloe":
+            if available_model_name == "yoloe":
                 batch_masks = predict_yoloe(
                     model,
                     batch_images,
                     eval_class_ids,
                     device
                 )
-            elif model_name == "sam3":
+            elif available_model_name == "sam3":
                 batch_masks = predict_sam3(
                     model,
                     batch_images,
@@ -512,7 +512,7 @@ def run_experiment1(
                     eval_class_names,
                     device
                 )
-            elif model_name == "gsam":
+            elif available_model_name == "gsam":
                 batch_masks = predict_gsam(
                     model,
                     batch_image_paths,
@@ -520,7 +520,7 @@ def run_experiment1(
                     eval_class_names,
                     device
                 )
-            elif model_name == "clip":
+            elif available_model_name == "clip":
                 batch_masks = predict_clip(
                     model,
                     batch_images,
@@ -528,7 +528,7 @@ def run_experiment1(
                     eval_class_names,
                     device
                 )
-            elif model_name == "siglip":
+            elif available_model_name == "siglip":
                 batch_masks = predict_siglip(
                     model,
                     batch_images,
@@ -566,3 +566,9 @@ def run_experiment1(
             )
 
         print_evaluation_results(results)
+        
+        # --- cleanup before loading the next model ---
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
