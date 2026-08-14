@@ -8,3 +8,5 @@ workspace/notebooks/weights/*
 workspace/data/*
 workspace/Datasets/*
 __pycache__/
+workspace/experiments/**/__pycache__/
+*.py[cod]
