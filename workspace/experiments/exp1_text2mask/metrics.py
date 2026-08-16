@@ -18,7 +18,7 @@ def _build_semantic_masks( pred_masks, gt_masks, gt_class_ids, image_shape, clas
 
     pred_semantic = {
         class_id: np.zeros((H, W), dtype=bool)
-        for class_id in class_ids
+        for class_id in set(class_ids)
     }
 
     gt_semantic = {
@@ -148,7 +148,7 @@ def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, c
                 "FN": 0,
                 "TN": 0,
             }
-            for class_id in class_ids
+            for class_id in set(class_ids)
         }
 
         accumulator["_runtime"] = {
@@ -196,7 +196,7 @@ def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, c
                 if v_id in gt_semantic:
                     void_mask |= gt_semantic[v_id]
 
-        for class_id in class_ids:
+        for class_id in set(class_ids):
 
             pred_mask = pred_semantic.get(
                 class_id,
@@ -242,6 +242,19 @@ def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
     # ---------------------------------------------------------
 
     for class_id, class_name in category_name_dict.items():
+
+        # Skip evaluation entirely for negative class ids
+        if class_id < 0:
+            per_class[class_id] = {
+                "class_name": class_name,
+                "TP": np.nan,
+                "FP": np.nan,
+                "FN": np.nan,
+                "TN": np.nan,
+                "IoU": np.nan,
+                "F1-Score": np.nan,
+            }
+            continue
 
         stats = accumulator.get(
             class_id,
@@ -385,7 +398,7 @@ def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
 
 def print_evaluation_results(results):
     """
-    Pretty-print evaluation results.
+    Pretty-print evaluation results, sorted alphabetically and grouped by evaluation status.
     """
 
     print("\n" + "=" * 80)
@@ -397,7 +410,7 @@ def print_evaluation_results(results):
     )
 
     print(
-        f"Mean_F1-Score:           {results['Mean_F1']:.4f}"
+        f"Mean_F1-Score:    {results['Mean_F1']:.4f}"
     )
 
     print(
@@ -435,7 +448,20 @@ def print_evaluation_results(results):
     print(header)
     print("-" * 80)
 
+    # Separate classes into evaluated (ID >= 0) and unevaluated (ID < 0)
+    evaluated_classes = []
+    unevaluated_classes = []
+    
     for class_id, stats in results["per_class"].items():
+        if class_id >= 0:
+            evaluated_classes.append(stats)
+        else:
+            unevaluated_classes.append(stats)
+            
+    # Sort evaluated classes alphabetically
+    evaluated_classes.sort(key=lambda x: x["class_name"].lower())
+
+    for stats in evaluated_classes:
 
         print(
             f"{stats['class_name']:<25}"
@@ -446,5 +472,21 @@ def print_evaluation_results(results):
             f"{stats['IoU']:>10.4f}"
             f"{stats['F1-Score']:>10.4f}"
         )
+
+    # Output unevaluated classes if they exist
+    if unevaluated_classes:
+        print("\n" + "-" * 80)
+        print(f"{'Unevaluated Classes (Not in Ground Truth)':<80}")
+        print("-" * 80)
+        for stats in unevaluated_classes:
+            print(
+                f"{stats['class_name']:<25}"
+                f"{'-':>12}"
+                f"{'-':>12}"
+                f"{'-':>12}"
+                f"{'-':>12}"
+                f"{'-':>10}"
+                f"{'-':>10}"
+            )
 
     print("=" * 80)

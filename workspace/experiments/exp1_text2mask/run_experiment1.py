@@ -3,6 +3,7 @@ import os
 import glob
 import random
 import time
+import yaml
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -21,11 +22,25 @@ from metrics import (
 # --------------------------------------- Load Data ----------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_subset=-1):
-    """Load COCO annotations and return images, masks, and file paths."""
+def load_data(dataset_dir, annotation_file=None, image_subset=-1):
+    """Load COCO annotations, YAML config, and return dataset and parameters."""
 
     dataset_dir = os.path.abspath(dataset_dir)
+    
+    # 1. Load YAML Configuration
+    yaml_files = glob.glob(os.path.join(dataset_dir, "*.yaml")) + glob.glob(os.path.join(dataset_dir, "*.yml"))
+    if not yaml_files:
+        raise FileNotFoundError(f"No .yaml configuration file found in {dataset_dir}")
+    
+    print("Using config file:", yaml_files[0])
+    with open(yaml_files[0], 'r') as f:
+        config = yaml.safe_load(f) or {}
+        
+    ignore_classes = config.get("ignore_classes", [])
+    void_classes = config.get("void_classes", [])
+    custom_prompts = config.get("custom_prompts", None)
 
+    # 2. Load JSON Annotations
     if annotation_file is None:
         json_files = glob.glob(os.path.join(dataset_dir, "*.json"))
         if not json_files:
@@ -33,13 +48,45 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
         annotation_file = json_files[0]
 
     print("Using annotation file:", annotation_file)
-    ignore_ids = set(class_ids_ignore or [])
     coco = COCO(annotation_file)
     
     categories = coco.loadCats(coco.getCatIds())
     category_names = {cat["id"]: cat["name"] for cat in categories}
+    name_to_id = {cat["name"]: cat["id"] for cat in categories}
+    
+    # 3. Process Ignore and Void Classes (Strings to IDs)
+    ignore_ids = set()
+    for cls_name in ignore_classes:
+        if cls_name not in name_to_id:
+            raise ValueError(f"Ignore class '{cls_name}' not found in dataset annotations.")
+        ignore_ids.add(name_to_id[cls_name])
+        
+    void_class_ids = []
+    for cls_name in void_classes:
+        if cls_name not in name_to_id:
+            raise ValueError(f"Void class '{cls_name}' not found in dataset annotations.")
+        void_class_ids.append(name_to_id[cls_name])
+
     gt_class_dict = {k: v for k, v in category_names.items() if k not in ignore_ids}
 
+    # Default to ground truth classes (as a dict) if custom_prompts is None
+    if custom_prompts is None:
+        custom_prompts = {
+            name: name for class_id, name in gt_class_dict.items() 
+            if class_id not in void_class_ids
+        }
+    elif isinstance(custom_prompts, list):
+        # Handle YAML list of dictionaries (e.g., "- key: value")
+        if all(isinstance(item, dict) for item in custom_prompts):
+            merged_prompts = {}
+            for d in custom_prompts:
+                merged_prompts.update(d)
+            custom_prompts = merged_prompts
+        else:
+            # Fallback for a flat list of strings (e.g., "- shore-artificial")
+            custom_prompts = {p: p for p in custom_prompts}
+
+    # 4. Load Images and Masks
     image_ids = coco.getImgIds()
     if image_subset > 0:
         image_ids = image_ids[:image_subset]
@@ -74,7 +121,7 @@ def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_su
         gt_class_ids.append(image_class_ids)
         gt_class_names.append(image_class_names)
 
-    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict
+    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids
 
 # ------------------------------------------------------------------------------------------
 # ----------------------------------------- Debug ------------------------------------------
@@ -247,11 +294,9 @@ if __name__ == "__main__":
     # --------------------------------------------------
     # Load Data
     # --------------------------------------------------
-    class_ids_ignore = [0] # 0: Hawaii-Database-official 
-
-    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict = load_data(
+    
+    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids = load_data(
         args.image_dataset,
-        class_ids_ignore=class_ids_ignore,
         image_subset=args.image_subset,
     )
 
@@ -260,13 +305,7 @@ if __name__ == "__main__":
     # --------------------------------------------------
     # Input
     # --------------------------------------------------
-    void_class_ids = [1, 6] #1: Tristan, 6: ego_vehicle
     
-    custom_prompts = [
-        "bridge", "building", "car", "mountain", "person", 
-        "pier", "shore-artificial", "sky", "vegetation", "water",  
-    ]
-
     # Process custom prompts mapping directly here
     name_to_id = {v: k for k, v in gt_class_dict.items()}
     prompt_category_dict = {}
@@ -274,16 +313,24 @@ if __name__ == "__main__":
     prompt_class_names = []
 
     neg_id_counter = -1
-    for prompt in custom_prompts:
-        if prompt in name_to_id:
-            prompt_id = name_to_id[prompt]
+    
+    # Iterate through the parsed dictionary keys and values
+    for target_class, prompt_string in custom_prompts.items():
+        if target_class in name_to_id:
+            prompt_id = name_to_id[target_class]
         else:
             prompt_id = neg_id_counter
             neg_id_counter -= 1
         
-        prompt_category_dict[prompt_id] = prompt
-        prompt_class_ids.append(prompt_id)
-        prompt_class_names.append(prompt)
+        prompt_category_dict[prompt_id] = target_class
+        
+        # Split the string by commas and register each specific prompt
+        prompts = [p.strip() for p in str(prompt_string).split(",")]
+        for p in prompts:
+            if not p:
+                continue
+            prompt_class_ids.append(prompt_id)
+            prompt_class_names.append(p)
 
     # --------------------------------------------------
     # Process
