@@ -1,15 +1,11 @@
 import csv
 import numpy as np
 
+# ------------------------------------------------------------------------------------------
+# ----------------------------------------- Helper -----------------------------------------
+# ------------------------------------------------------------------------------------------
 
-def _build_semantic_masks(
-    pred_masks,
-    gt_masks,
-    gt_class_ids,
-    image_shape,
-    class_ids,
-    void_class_ids=None
-):
+def _build_semantic_masks( pred_masks, gt_masks, gt_class_ids, image_shape, class_ids, void_class_ids=None):
     """
     Convert instance masks into per-class binary semantic masks.
     """
@@ -75,12 +71,7 @@ def _build_semantic_masks(
 
     return pred_semantic, gt_semantic
 
-
-def _compute_confusion(
-    pred_mask,
-    gt_mask,
-    void_mask=None
-):
+def _compute_confusion(pred_mask, gt_mask, void_mask=None):
     """
     Compute pixel-level TP, FP, FN, TN, factoring out void areas.
     """
@@ -105,10 +96,7 @@ def _compute_confusion(
         "TN": int(tn),
     }
 
-def _save_accumulator_csv(
-    accumulator,
-    csv_path,
-):
+def _save_accumulator_csv(accumulator, csv_path):
     """
     Save the current accumulated TP/FP/FN/TN values to CSV.
     """
@@ -143,17 +131,11 @@ def _save_accumulator_csv(
                 "TN": stats["TN"],
             })
 
-def evaluate_batch(
-    batch_masks,
-    batch_gt_masks,
-    batch_class_ids,
-    batch_images,
-    class_ids,
-    void_class_ids=None,
-    accumulator=None,
-    runtime=None,
-    csv_path=None,
-):
+# ------------------------------------------------------------------------------------------
+# ---------------------------------------- Process -----------------------------------------
+# ------------------------------------------------------------------------------------------
+
+def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, class_ids, void_class_ids=None, accumulator=None, runtime=None, csv_path=None,):
     """
     Evaluate one batch of predictions with void subtraction.
     """
@@ -245,12 +227,7 @@ def evaluate_batch(
 
     return accumulator
 
-
-def finalize_evaluation(
-    accumulator,
-    category_name_dict,
-    csv_path=None,
-):
+def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
     """
     Compute final dataset-level metrics from an accumulator.
     """
@@ -402,6 +379,9 @@ def finalize_evaluation(
     
     return results
 
+# ------------------------------------------------------------------------------------------
+# ----------------------------------------- Display ----------------------------------------
+# ------------------------------------------------------------------------------------------
 
 def print_evaluation_results(results):
     """

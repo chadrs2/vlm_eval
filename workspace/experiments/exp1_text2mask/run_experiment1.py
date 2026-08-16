@@ -1,6 +1,8 @@
 from argparse import ArgumentParser
 import os
+import glob
 import random
+import time
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -8,114 +10,84 @@ from PIL import Image
 
 from pycocotools.coco import COCO
 
+# Import metrics logic originally held in the helper
+from metrics import (
+    evaluate_batch,
+    finalize_evaluation,
+    print_evaluation_results,
+)
+
+# ------------------------------------------------------------------------------------------
+# --------------------------------------- Load Data ----------------------------------------
+# ------------------------------------------------------------------------------------------
 
 def load_data(dataset_dir, class_ids_ignore=None, annotation_file=None, image_subset=-1):
-    """Load COCO annotations and return images, masks, and file paths.
-
-    Returns: images, masks, class_ids, class_names, category_name_dict, image_paths
-    """
+    """Load COCO annotations and return images, masks, and file paths."""
 
     dataset_dir = os.path.abspath(dataset_dir)
 
     if annotation_file is None:
-        annotation_file = os.path.join(
-            dataset_dir,
-            "_annotations.coco.json"
-        )
+        json_files = glob.glob(os.path.join(dataset_dir, "*.json"))
+        if not json_files:
+            raise FileNotFoundError(f"No .json annotation file found in {dataset_dir}")
+        annotation_file = json_files[0]
 
+    print("Using annotation file:", annotation_file)
     ignore_ids = set(class_ids_ignore or [])
-
-    # Load COCO annotations
     coco = COCO(annotation_file)
-
-    # Category ID -> category name
+    
     categories = coco.loadCats(coco.getCatIds())
-    category_names = {
-        cat["id"]: cat["name"]
-        for cat in categories
-    }
-    category_name_dict = {k: v for k, v in category_names.items() if k not in ignore_ids}
+    category_names = {cat["id"]: cat["name"] for cat in categories}
+    gt_class_dict = {k: v for k, v in category_names.items() if k not in ignore_ids}
 
-    # Get image IDs
     image_ids = coco.getImgIds()
-
     if image_subset > 0:
         image_ids = image_ids[:image_subset]
 
-    images = []
-    masks = []
-    class_ids = []
-    class_names = []
-    image_paths = []
+    images, image_paths, gt_masks, gt_class_ids, gt_class_names = [], [], [], [], []
 
     for image_id in image_ids:
-
-        # Image metadata
         img_meta = coco.loadImgs(image_id)[0]
-
-        image_path = os.path.join(
-            dataset_dir,
-            img_meta["file_name"]
-        )
-
-        image = np.array(
-            Image.open(image_path).convert("RGB")
-        )
-        # Track the original image filepath
+        image_path = os.path.join(dataset_dir, img_meta["file_name"])
+        image = np.array(Image.open(image_path).convert("RGB"))
+        
         image_paths.append(image_path)
+        image_masks, image_class_ids, image_class_names = [], [], []
 
-        image_masks = []
-        image_class_ids = []
-        image_class_names = []
-
-        # Get all annotations for this image
         ann_ids = coco.getAnnIds(imgIds=[image_id])
         annotations = coco.loadAnns(ann_ids)
 
         for ann in annotations:
-
             category_id = int(ann["category_id"])
-
-            # Ignore unwanted classes
             if category_id in ignore_ids:
                 continue
 
-            # Convert COCO polygon/RLE -> binary mask
             mask = coco.annToMask(ann)
-
-            # Ensure uint8 binary mask
             mask = (mask > 0).astype(np.uint8)
 
             image_masks.append(mask)
             image_class_ids.append(category_id)
-            image_class_names.append(
-                category_names.get(category_id, "unknown")
-            )
+            image_class_names.append(category_names.get(category_id, "unknown"))
 
         images.append(image)
-        masks.append(image_masks)
-        class_ids.append(image_class_ids)
-        class_names.append(image_class_names)
+        gt_masks.append(image_masks)
+        gt_class_ids.append(image_class_ids)
+        gt_class_names.append(image_class_names)
 
-    return images, masks, class_ids, class_names, category_name_dict, image_paths
+    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict
 
+# ------------------------------------------------------------------------------------------
+# ----------------------------------------- Debug ------------------------------------------
+# ------------------------------------------------------------------------------------------
 
-def debug_visualize_random_image(
-    images,
-    masks,
-    class_ids,
-    class_names,
-    alpha=0.45,
-):
+def debug_visualize_random_image(images, masks, class_ids, class_names, alpha=0.45):
     """Randomly visualize one image with instance masks and bounding boxes."""
 
     if len(images) == 0:
         print("No images available.")
         return
 
-    # Randomly select an image
     image_idx = random.randrange(len(images))
-
     image = images[image_idx]
     image_masks = masks[image_idx]
     image_class_ids = class_ids[image_idx]
@@ -127,273 +99,226 @@ def debug_visualize_random_image(
 
     fig, ax = plt.subplots(figsize=(14, 10))
     ax.imshow(image)
-
-    # Generate distinct colors for each mask
     cmap = plt.get_cmap("tab20")
 
     for mask_idx, mask in enumerate(image_masks):
-
-        # Make sure mask is binary
         mask = mask.astype(bool)
-
         if not np.any(mask):
             print(f"WARNING: Mask {mask_idx} is empty.")
             continue
 
-        # ---------------------------------------------------------
-        # Mask overlay
-        # ---------------------------------------------------------
         color = cmap(mask_idx % 20)[:3]
-
-        colored_mask = np.zeros(
-            (*mask.shape, 4),
-            dtype=np.float32
-        )
-
+        colored_mask = np.zeros((*mask.shape, 4), dtype=np.float32)
         colored_mask[..., :3] = color
         colored_mask[..., 3] = mask * alpha
-
         ax.imshow(colored_mask)
 
-        # ---------------------------------------------------------
-        # Bounding box
-        # ---------------------------------------------------------
         ys, xs = np.where(mask)
+        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = ys.min(), ys.max()
+        width, height = x_max - x_min, y_max - y_min
 
-        x_min = xs.min()
-        x_max = xs.max()
-        y_min = ys.min()
-        y_max = ys.max()
-
-        width = x_max - x_min
-        height = y_max - y_min
-
-        rect = patches.Rectangle(
-            (x_min, y_min),
-            width,
-            height,
-            linewidth=2,
-            edgecolor=color,
-            facecolor="none",
-        )
-
+        rect = patches.Rectangle((x_min, y_min), width, height, linewidth=2, edgecolor=color, facecolor="none")
         ax.add_patch(rect)
 
-        # ---------------------------------------------------------
-        # Label
-        # ---------------------------------------------------------
         class_name = image_class_names[mask_idx]
         class_id = image_class_ids[mask_idx]
-
         label = f"{mask_idx}: {class_name} (id={class_id})"
+        ax.text(x_min, max(0, y_min - 5), label, color="white", fontsize=10, fontweight="bold", 
+                bbox=dict(facecolor=color, alpha=0.8, pad=2, edgecolor="none"))
 
-        ax.text(
-            x_min,
-            max(0, y_min - 5),
-            label,
-            color="white",
-            fontsize=10,
-            fontweight="bold",
-            bbox=dict(
-                facecolor=color,
-                alpha=0.8,
-                pad=2,
-                edgecolor="none",
-            ),
-        )
-
-    ax.set_title(
-        f"Image {image_idx} — {len(image_masks)} masks"
-    )
+    ax.set_title(f"Image {image_idx} — {len(image_masks)} masks")
     ax.axis("off")
-
     plt.tight_layout()
     plt.show()
 
-def run_experiment(
-    images, 
-    image_paths,
-    gt_masks, 
-    class_ids, 
-    class_names, 
-    category_name_dict, 
-    env="gsam", 
-    model="all", 
-    output_folder=None,
-    batch_size=8,
-    device="cuda:0",
-    custom_prompts=None,
-    void_class_ids=None
-):
-    # Import conda env variables
-    if env == "gsam":
-        import gsam_masks_helper
-        from gsam_masks_helper import run_experiment1
-        run_experiment1(
-            images,
-            image_paths,
-            gt_masks,
-            class_ids,
-            class_names,
-            category_name_dict,
-            model_name=model,
-            output_folder=output_folder,
-            batch_size=batch_size,
-            device=device,
-            custom_prompts=custom_prompts,
-            void_class_ids=void_class_ids
-        ) 
-    elif env == "clipdino":
-        import clipdino_masks_helper
-        from clipdino_masks_helper import run_experiment1
-        run_experiment1(
-            images,
-            image_paths,
-            gt_masks,
-            class_ids,
-            class_names,
-            category_name_dict,
-            model_name=model,
-            output_folder=output_folder,
-            batch_size=batch_size,
-            device=device,
-            custom_prompts=custom_prompts,
-            void_class_ids=void_class_ids
-        )    
-    else: # "radio"
-        import radio_masks_helper
-        from radio_masks_helper import run_experiment1
-        run_experiment1(
-            images,
-            image_paths,
-            gt_masks,
-            class_ids,
-            class_names,
-            category_name_dict,
-            model_name=model,
-            output_folder=output_folder,
-            batch_size=batch_size,
-            device=device,
-            custom_prompts=custom_prompts,
-            void_class_ids=void_class_ids
-        )    
-    pass
+# ------------------------------------------------------------------------------------------
+# --------------------------------------- Experiment ---------------------------------------
+# ------------------------------------------------------------------------------------------
 
+def run_experiment(
+    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, 
+    env="gsam", model_name="all", batch_size=8, device="cuda:0",
+    prompt_class_ids=None, prompt_class_names=None, void_class_ids=None
+):
+    
+    # --------------------------------------------------
+    # Environment Setup
+    # --------------------------------------------------
+    if env == "gsam":
+        import gsam_masks_helper as helper
+    elif env == "clipdino":
+        import clipdino_masks_helper as helper
+    elif env == "radio":
+        import radio_masks_helper as helper
+    else:
+        raise ValueError("Invalid environment specified.")
+
+    print(f"Running {model_name}...")
+
+    # --------------------------------------------------
+    # Model Setup
+    # --------------------------------------------------
+
+    # 1. Initialize the model once
+    model = helper.init_model(model_name, prompt_class_names, device)
+    
+    evaluation = None
+
+    # --------------------------------------------------
+    # Experiment Loop
+    # --------------------------------------------------
+
+    # 2. Main script controls the batch loop
+    for start_idx in range(0, len(images), batch_size):
+        end_idx = min(start_idx + batch_size, len(images))
+        
+        batch_images = images[start_idx:end_idx]
+        batch_image_paths = image_paths[start_idx:end_idx]
+        batch_gt_masks = gt_masks[start_idx:end_idx]
+        batch_gt_class_ids = gt_class_ids[start_idx:end_idx]
+        
+        start_time = time.perf_counter()
+        
+        # 3. Ask helper for predictions
+        batch_masks = helper.predict_batch_masks(
+            model=model,
+            current_model_name=model_name,
+            batch_images=batch_images,
+            batch_image_paths=batch_image_paths,
+            prompt_class_ids=prompt_class_ids,
+            prompt_class_names=prompt_class_names,
+            device=device
+        )
+        
+        runtime = time.perf_counter() - start_time
+
+        # --------------------------------------------------
+        # Evaluation
+        # --------------------------------------------------
+        
+        # 4. Evaluate immediately
+        evaluation = evaluate_batch(
+            batch_masks=batch_masks,
+            batch_gt_masks=batch_gt_masks,
+            batch_class_ids=batch_gt_class_ids,
+            batch_images=batch_images,
+            class_ids=prompt_class_ids,
+            void_class_ids=void_class_ids,
+            accumulator=evaluation,
+            runtime=runtime,
+        )
+
+    # --------------------------------------------------
+    # Cleanup
+    # --------------------------------------------------
+
+    # 5. Clean up the model to free GPU memory
+    helper.cleanup_model(model)
+    
+    return evaluation
 
 def arg_parser():
     parser = ArgumentParser(description="Running Experiment 1: Text Query to Class Mask")
-    parser.add_argument('conda_env', 
-                        type=str, 
-                        default='gsam',
-                        help="Enter corresponding conda env for dependency purposes from [gsam, clipdino, radio]")
-    parser.add_argument('--image_dataset',
-                        type=str,
-                        required=True,
-                        help="Folderpath to dataset being evaluated on")
-    parser.add_argument('--output',
-                        type=str,
-                        default='',
-                        help="Output folder to save all results to")
-    parser.add_argument('--image_subset',
-                        type=int,
-                        default=-1,
-                        help="(Optional) Only evaluate on <image_subset> number of images")
-    parser.add_argument('--model',
-                        type=str,
-                        default="all",
-                        help="(Optional) Name of VLM model to evaluate if not all [yoloe, clip, siglip, gsam, sam3, radio, clipdino]")
-    parser.add_argument('--batch_size',
-                        type=int,
-                        default=8,
-                        help="(Optional) Image batch size")
-    parser.add_argument('--device',
-                        type=str,
-                        default="cuda:0",
-                        help="Device to run models on [cuda:0, cpu]")
+    parser.add_argument('conda_env', type=str, default='gsam', help="Enter corresponding conda env for dependency purposes from [gsam, clipdino, radio]")
+    parser.add_argument('--image_dataset', type=str, required=True, help="Folderpath to dataset being evaluated on")
+    parser.add_argument('--output', type=str, default='', help="Output folder to save all results to")
+    parser.add_argument('--image_subset', type=int, default=-1, help="(Optional) Only evaluate on <image_subset> number of images")
+    parser.add_argument('--model', type=str, default="all", help="(Optional) Name of VLM model to evaluate if not all [yoloe, clip, siglip, gsam, sam3, radio, clipdino]")
+    parser.add_argument('--batch_size', type=int, default=8, help="(Optional) Image batch size")
+    parser.add_argument('--device', type=str, default="cuda:0", help="Device to run models on [cuda:0, cpu]")
     return parser.parse_args()
 
-
 if __name__ == "__main__":
+
+    # --------------------------------------------------
+    # Arguments
+    # --------------------------------------------------
     args = arg_parser()
     
-    # Import conda env variables
-    if args.conda_env != "gsam" and args.conda_env != "clipdino" and args.conda_env != "radio":
+    if args.conda_env not in ["gsam", "clipdino", "radio"]:
         print("Incorrect conda environment name. Should be either [gsam, clipdino, radio]") 
-        print("Exiting...")
         exit()
     
-    output_folder = args.output
-    if len(output_folder) == 0:
-        output_folder = None
-    else:
-        os.makedirs(output_folder,exist_ok=True)
-      
-    # ---------------------------------------------------------
-    # Custom Evaluation Settings
-    # ---------------------------------------------------------
-    
-    void_class_ids = []
-    # void_class_ids = [1, 5] # test IDs
-    # void_class_ids = [1, 6] # full Hawaii dataset IDS
-    
-    # Load data
-    # (Do NOT ignore 1 and 6 during load_data, so their ground truth is available for void subtraction!)
-    # class_ids_ignore = [0] # Hawaii-Database-official 
-    class_ids_ignore = [0,1,5] # Hawaii-Database-official 
-    
-    custom_prompts = [
-        "bridge",
-        "building",
-        "car",
-        "mountain",
-        "person",
-        "pier",
-        "shore-artificial",
-        "sky",
-        "vegetation",
-        "water",  
-    ]
-    # custom_prompts = [
-    #     "vegetation",
-    #     "boat", 
-    #     "car",
-    #     "person",
-    #     "buoy", "building",
-    #     "piling",
-    #     "water", "mountain", "sky",
-    #     "gangway", "bridge",
-    #     "float", "pier", "wharf",
-    #     "shore-natural", "shore-artificial"
-    # ]
-    
-    images, masks, class_ids, class_names, cat_name_dict, image_paths = load_data(
+    output_folder = args.output if len(args.output) > 0 else None
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
+
+    # --------------------------------------------------
+    # Load Data
+    # --------------------------------------------------
+    class_ids_ignore = [0] # 0: Hawaii-Database-official 
+
+    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict = load_data(
         args.image_dataset,
         class_ids_ignore=class_ids_ignore,
         image_subset=args.image_subset,
     )
-    # Debug visualization to make sure data is loaded properly
-    debug_visualize_random_image(
-        images,
-        masks,
-        class_ids,
-        class_names,
-    )
+
+    debug_visualize_random_image(images, gt_masks, gt_class_ids, gt_class_names)
+
+    # --------------------------------------------------
+    # Input
+    # --------------------------------------------------
+    void_class_ids = [1, 6] #1: Tristan, 6: ego_vehicle
     
-    # Execute experiment & save results
-    results = run_experiment(
+    custom_prompts = [
+        "bridge", "building", "car", "mountain", "person", 
+        "pier", "shore-artificial", "sky", "vegetation", "water",  
+    ]
+
+    # Process custom prompts mapping directly here
+    name_to_id = {v: k for k, v in gt_class_dict.items()}
+    prompt_category_dict = {}
+    prompt_class_ids = []
+    prompt_class_names = []
+
+    neg_id_counter = -1
+    for prompt in custom_prompts:
+        if prompt in name_to_id:
+            prompt_id = name_to_id[prompt]
+        else:
+            prompt_id = neg_id_counter
+            neg_id_counter -= 1
+        
+        prompt_category_dict[prompt_id] = prompt
+        prompt_class_ids.append(prompt_id)
+        prompt_class_names.append(prompt)
+
+    # --------------------------------------------------
+    # Process
+    # --------------------------------------------------
+
+    # Execute experiment batch loop and fetch evaluation accumulator
+    evaluation_accumulator = run_experiment(
         images, 
         image_paths,
-        masks, 
-        class_ids, 
-        class_names,
-        cat_name_dict,
+        gt_masks, 
+        gt_class_ids, 
+        gt_class_names,
+        gt_class_dict,
         env=args.conda_env, 
-        model=args.model,
-        output_folder=output_folder,
+        model_name=args.model,
         batch_size=args.batch_size,
         device=args.device,
-        custom_prompts=custom_prompts,
+        prompt_class_ids=prompt_class_ids,
+        prompt_class_names=prompt_class_names,
         void_class_ids=void_class_ids
     )
     
-    # TODO: Display results
+    # --------------------------------------------------
+    # Output
+    # --------------------------------------------------
+    if output_folder:
+        final_results = finalize_evaluation(
+            evaluation_accumulator,
+            prompt_category_dict,
+            csv_path=os.path.join(output_folder, f"{args.model}_final_results.csv"),
+        )
+    else:
+        final_results = finalize_evaluation(
+            evaluation_accumulator,
+            prompt_category_dict,
+        )
+
+    print_evaluation_results(final_results)
