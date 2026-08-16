@@ -69,24 +69,30 @@ def load_data(dataset_dir, annotation_file=None, image_subset=-1):
 
     gt_class_dict = {k: v for k, v in category_names.items() if k not in ignore_ids}
 
-    # Default to ground truth classes (as a dict) if custom_prompts is None
+    # 4. Standardize Custom Prompts Mapping
     if custom_prompts is None:
+        # Default to ground truth classes
         custom_prompts = {
             name: name for class_id, name in gt_class_dict.items() 
             if class_id not in void_class_ids
         }
+    elif isinstance(custom_prompts, dict):
+        # Handle dict format where some values might be None (blank in YAML)
+        for k, v in custom_prompts.items():
+            if v is None:
+                custom_prompts[k] = k
     elif isinstance(custom_prompts, list):
-        # Handle YAML list of dictionaries (e.g., "- key: value")
-        if all(isinstance(item, dict) for item in custom_prompts):
-            merged_prompts = {}
-            for d in custom_prompts:
-                merged_prompts.update(d)
-            custom_prompts = merged_prompts
-        else:
-            # Fallback for a flat list of strings (e.g., "- shore-artificial")
-            custom_prompts = {p: p for p in custom_prompts}
+        # Handle list format with a mix of dicts and strings
+        merged_prompts = {}
+        for item in custom_prompts:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    merged_prompts[k] = v if v is not None else k
+            elif isinstance(item, str):
+                merged_prompts[item] = item
+        custom_prompts = merged_prompts
 
-    # 4. Load Images and Masks
+    # 5. Load Images and Masks
     image_ids = coco.getImgIds()
     if image_subset > 0:
         image_ids = image_ids[:image_subset]
