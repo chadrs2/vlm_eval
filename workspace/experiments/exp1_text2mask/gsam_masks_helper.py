@@ -69,8 +69,14 @@ def _load_model_hf(repo_id, filename, ckpt_config_filename, device='cpu'):
 
 def load_gsam(all_class_names, device):
     ckpt_repo_id = "ShilongLiu/GroundingDINO"
+    
     ckpt_filename = "groundingdino_swint_ogc.pth"
-    ckpt_config_filename = "GroundingDINO_SwinT_OGC.cfg.py"
+    ckpt_config_filename = "GroundingDINO_SwinT_OGC.cfg.py" 
+
+    # swinB weights
+    # ckpt_filename = "groundingdino_swinb_cogcoor.pth"
+    # ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
+
     groundingdino_model = _load_model_hf(ckpt_repo_id, ckpt_filename, ckpt_config_filename, device=device)
     
     sam_checkpoint = '/workspace/models/sam_vit_b_01ec64.pth' 
@@ -180,10 +186,11 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
 
         masks = {}
         for mask, text in zip(gsam_masks, phrases):
-            words = text.split(" ") if " " in text else [text]
-            for st in words:
-                if st in prompt_class_names:
-                    class_idx = prompt_class_names.index(st)
+            # Iterate through the custom prompts directly instead of splitting by space
+            for class_name in prompt_class_names:
+                # Substring matching handles Grounding DINO's tendency to slightly alter phrases
+                if class_name.lower() in text.lower() or text.lower() in class_name.lower():
+                    class_idx = prompt_class_names.index(class_name)
                     gt_class_id = prompt_class_ids[class_idx]
                     
                     mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8) 
@@ -254,7 +261,8 @@ def _get_clip_mask_embs(fsam_model, clip_model, images, device):
 
 def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
     clip_mask_embs, all_fsam_masks = _get_clip_mask_embs(model[0], model[1], images, device)
-    toks = model[1].tokenize(prompt_class_names)
+    clip_prompts = [f"a photo of a {class_name}" for class_name in prompt_class_names]
+    toks = model[1].tokenize(clip_prompts)
     clip_txt_embs = model[1].encode_text(toks)
     
     COSSIM_THRESHOLD = 0.25
@@ -301,7 +309,8 @@ def _get_siglip_mask_embs(fsam_model, siglip_processor, siglip_model, images, de
 def predict_siglip(model, images, prompt_class_ids, prompt_class_names, device):
     siglip_mask_embs, all_fsam_masks = _get_siglip_mask_embs(model[0], model[1], model[2], images, device)
     
-    text_inputs = model[1](text=prompt_class_names, return_tensors="pt", padding="max_length").to(device)
+    siglip_prompts = [f"a photo of a {class_name}" for class_name in prompt_class_names]
+    text_inputs = model[1](text=siglip_prompts, return_tensors="pt", padding="max_length").to(device)
     with torch.no_grad():
         siglip_text_embeds = model[2].get_text_features(**text_inputs)
         siglip_text_embeds = F.normalize(siglip_text_embeds, p=2, dim=-1)

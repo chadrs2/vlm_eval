@@ -1,5 +1,6 @@
 import csv
 import numpy as np
+import os
 
 # ------------------------------------------------------------------------------------------
 # ----------------------------------------- Helper -----------------------------------------
@@ -135,10 +136,12 @@ def _save_accumulator_csv(accumulator, csv_path):
 # ---------------------------------------- Process -----------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, class_ids, void_class_ids=None, accumulator=None, runtime=None, csv_path=None,):
+def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, class_ids, void_class_ids=None, accumulator=None, runtime=None, csv_path=None, confusion_pairs=None):
     """
-    Evaluate one batch of predictions with void subtraction.
+    Evaluate one batch of predictions with void subtraction and inter-class confusion.
     """
+    if confusion_pairs is None:
+        confusion_pairs = []
 
     if accumulator is None:
         accumulator = {
@@ -155,6 +158,11 @@ def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, c
             "total": 0.0,
             "num_images": 0,
             "num_batches": 0,
+        }
+        
+        accumulator["_pairwise_confusion"] = {
+            pair: np.zeros((3, 3), dtype=np.int64)
+            for pair in confusion_pairs
         }
 
     # ---------------------------------------------------------
@@ -218,6 +226,44 @@ def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, c
             accumulator[class_id]["FP"] += stats["FP"]
             accumulator[class_id]["FN"] += stats["FN"]
             accumulator[class_id]["TN"] += stats["TN"]
+            
+        # ---------------------------------------------------------
+        # Compute Inter-Class Confusion (GT vs Pred Overlap)
+        # ---------------------------------------------------------
+        for pair in confusion_pairs:
+            id_a, id_b = pair
+            gt_a = gt_semantic.get(id_a, np.zeros((H, W), dtype=bool))
+            gt_b = gt_semantic.get(id_b, np.zeros((H, W), dtype=bool))
+            
+            pred_a = pred_semantic.get(id_a, np.zeros((H, W), dtype=bool))
+            pred_b = pred_semantic.get(id_b, np.zeros((H, W), dtype=bool))
+            
+            valid_mask = ~void_mask if void_mask is not None else np.ones((H, W), dtype=bool)
+            
+            gt_a = gt_a & valid_mask
+            gt_b = gt_b & valid_mask
+            pred_a = pred_a & valid_mask
+            pred_b = pred_b & valid_mask
+            
+            gt_neither = ~(gt_a | gt_b) & valid_mask
+            pred_neither = ~(pred_a | pred_b) & valid_mask
+            
+            matrix = accumulator["_pairwise_confusion"][pair]
+            
+            # Row 0: GT A
+            matrix[0, 0] += (gt_a & pred_a).sum()
+            matrix[0, 1] += (gt_a & pred_b).sum()
+            matrix[0, 2] += (gt_a & pred_neither).sum()
+            
+            # Row 1: GT B
+            matrix[1, 0] += (gt_b & pred_a).sum()
+            matrix[1, 1] += (gt_b & pred_b).sum()
+            matrix[1, 2] += (gt_b & pred_neither).sum()
+            
+            # Row 2: GT Neither
+            matrix[2, 0] += (gt_neither & pred_a).sum()
+            matrix[2, 1] += (gt_neither & pred_b).sum()
+            matrix[2, 2] += (gt_neither & pred_neither).sum()
     
     if csv_path is not None:
         _save_accumulator_csv(
@@ -229,7 +275,7 @@ def evaluate_batch(batch_masks, batch_gt_masks, batch_class_ids, batch_images, c
 
 def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
     """
-    Compute final dataset-level metrics from an accumulator.
+    Compute final dataset-level metrics from an accumulator and save confusion matrix.
     """
 
     per_class = {}
@@ -389,6 +435,26 @@ def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
                     "total_runtime": runtime_info["total"],
                     "num_images": runtime_info["num_images"],
                 })
+                
+        # ---------------------------------------------------------
+        # Write Pairwise 3x3 Matrices
+        # ---------------------------------------------------------
+        if "_pairwise_confusion" in accumulator and accumulator["_pairwise_confusion"]:
+            pairwise_csv_path = csv_path.replace(".csv", "_3x3_pairwise_confusion.csv")
+            with open(pairwise_csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                for pair, matrix in accumulator["_pairwise_confusion"].items():
+                    name_a = category_name_dict.get(pair[0], str(pair[0]))
+                    name_b = category_name_dict.get(pair[1], str(pair[1]))
+                    
+                    writer.writerow([f"Pair: {name_a} vs {name_b}"])
+                    writer.writerow(["", f"Pred: {name_a}", f"Pred: {name_b}", "Pred: Neither"])
+                    writer.writerow([f"GT: {name_a}", matrix[0, 0], matrix[0, 1], matrix[0, 2]])
+                    writer.writerow([f"GT: {name_b}", matrix[1, 0], matrix[1, 1], matrix[1, 2]])
+                    writer.writerow(["GT: Neither", matrix[2, 0], matrix[2, 1], matrix[2, 2]])
+                    writer.writerow([])
+                    
+            results["pairwise_matrix_path"] = pairwise_csv_path
     
     return results
 
@@ -396,13 +462,13 @@ def finalize_evaluation(accumulator, category_name_dict, csv_path=None):
 # ----------------------------------------- Display ----------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def print_evaluation_results(results):
+def print_evaluation_results(results, model_name, dataset_name):
     """
     Pretty-print evaluation results, sorted alphabetically and grouped by evaluation status.
     """
 
     print("\n" + "=" * 80)
-    print("EVALUATION RESULTS")
+    print(f"EVALUATION RESULTS: {model_name} ({dataset_name})")
     print("=" * 80)
 
     print(
@@ -490,3 +556,7 @@ def print_evaluation_results(results):
             )
 
     print("=" * 80)
+    
+    if "pairwise_matrix_path" in results:
+        print(f"\n--> Inter-class confusion matrix saved to:")
+        print(f"    {results['pairwise_matrix_path']}")

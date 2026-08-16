@@ -36,9 +36,10 @@ def load_data(dataset_dir, annotation_file=None, image_subset=-1):
     with open(yaml_files[0], 'r') as f:
         config = yaml.safe_load(f) or {}
         
-    ignore_classes = config.get("ignore_classes", [])
-    void_classes = config.get("void_classes", [])
+    ignore_classes = config.get("ignore_classes", []) or []
+    void_classes = config.get("void_classes", []) or []
     custom_prompts = config.get("custom_prompts", None)
+    confusion_pairs_yaml = config.get("confusion_pairs", [])
 
     # 2. Load JSON Annotations
     if annotation_file is None:
@@ -127,7 +128,7 @@ def load_data(dataset_dir, annotation_file=None, image_subset=-1):
         gt_class_ids.append(image_class_ids)
         gt_class_names.append(image_class_names)
 
-    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids
+    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml
 
 # ------------------------------------------------------------------------------------------
 # ----------------------------------------- Debug ------------------------------------------
@@ -185,6 +186,77 @@ def debug_visualize_random_image(images, masks, class_ids, class_names, alpha=0.
     plt.tight_layout()
     plt.show()
 
+def debug_visualize_predictions(
+    batch_images, batch_image_paths, batch_masks, 
+    prompt_class_ids, prompt_class_names, target_image_name, alpha=0.45
+):
+    """Visualize predicted masks for a specific target image from a batch."""
+    
+    if not target_image_name:
+        return
+
+    for i, img_path in enumerate(batch_image_paths):
+        if target_image_name in img_path:
+            print(f"\n--- DEBUGGER TRIGGERED FOR: {target_image_name} ---")
+            img = batch_images[i]
+            pred_masks_dict = batch_masks[i]
+            
+            fig, ax = plt.subplots(figsize=(14, 10))
+            ax.imshow(img)
+            cmap = plt.get_cmap("tab20")
+            
+            color_idx = 0
+            for class_id, masks in pred_masks_dict.items():
+                # Attempt to resolve the prompt name for the label
+                class_name = "unknown"
+                if prompt_class_ids and class_id in prompt_class_ids:
+                    idx = prompt_class_ids.index(class_id)
+                    class_name = prompt_class_names[idx]
+
+                for mask in masks:
+                    mask = mask.astype(bool)
+                    if not np.any(mask):
+                        continue
+                    
+                    color = cmap(color_idx % 20)[:3]
+                    
+                    # Apply colored mask
+                    colored_mask = np.zeros((*mask.shape, 4), dtype=np.float32)
+                    colored_mask[..., :3] = color
+                    colored_mask[..., 3] = alpha
+                    ax.imshow(colored_mask)
+                    
+                    # Generate Bounding Box
+                    ys, xs = np.where(mask)
+                    if len(ys) > 0 and len(xs) > 0:
+                        x_min, x_max = xs.min(), xs.max()
+                        y_min, y_max = ys.min(), ys.max()
+                        width, height = x_max - x_min, y_max - y_min
+                        
+                        rect = patches.Rectangle((x_min, y_min), width, height, linewidth=2, edgecolor=color, facecolor="none")
+                        ax.add_patch(rect)
+                        
+                        # Add text label
+                        label = f"{class_name} (id={class_id})"
+                        ax.text(x_min, max(0, y_min - 5), label, color="white", fontsize=10, fontweight="bold", 
+                                bbox=dict(facecolor=color, alpha=0.8, pad=2, edgecolor="none"))
+                    
+                    color_idx += 1
+                    
+            ax.set_title(f"Predicted Masks: {os.path.basename(img_path)}")
+            ax.axis("off")
+            plt.tight_layout()
+
+            # Save the figure instead of trying to show it
+            output_dir = "."
+            os.makedirs(output_dir, exist_ok=True)
+            save_path = os.path.join(output_dir, f"debug_pred_{os.path.basename(img_path)}")
+            plt.savefig(save_path, bbox_inches='tight', dpi=150)
+            print(f"Saved debug visualization to: {save_path}")
+            
+            # Close the figure to free up memory
+            plt.close(fig)
+
 # ------------------------------------------------------------------------------------------
 # --------------------------------------- Experiment ---------------------------------------
 # ------------------------------------------------------------------------------------------
@@ -192,7 +264,7 @@ def debug_visualize_random_image(images, masks, class_ids, class_names, alpha=0.
 def run_experiment(
     images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, 
     env="gsam", model_name="all", batch_size=8, device="cuda:0",
-    prompt_class_ids=None, prompt_class_names=None, void_class_ids=None
+    prompt_class_ids=None, prompt_class_names=None, void_class_ids=None, confusion_pairs=None
 ):
     
     # --------------------------------------------------
@@ -247,6 +319,24 @@ def run_experiment(
         runtime = time.perf_counter() - start_time
 
         # --------------------------------------------------
+        # Debugger
+        # --------------------------------------------------
+        
+        # change variable to name of image
+        TARGET_DEBUG_IMAGE = None
+
+        if TARGET_DEBUG_IMAGE is not None:
+            # dispaly predicted masks
+            debug_visualize_predictions(
+                batch_images=batch_images,
+                batch_image_paths=batch_image_paths,
+                batch_masks=batch_masks,
+                prompt_class_ids=prompt_class_ids,
+                prompt_class_names=prompt_class_names,
+                target_image_name=TARGET_DEBUG_IMAGE
+            )
+
+        # --------------------------------------------------
         # Evaluation
         # --------------------------------------------------
         
@@ -260,6 +350,7 @@ def run_experiment(
             void_class_ids=void_class_ids,
             accumulator=evaluation,
             runtime=runtime,
+            confusion_pairs=confusion_pairs
         )
 
     # --------------------------------------------------
@@ -301,7 +392,7 @@ if __name__ == "__main__":
     # Load Data
     # --------------------------------------------------
     
-    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids = load_data(
+    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml = load_data(
         args.image_dataset,
         image_subset=args.image_subset,
     )
@@ -339,6 +430,20 @@ if __name__ == "__main__":
             prompt_class_names.append(p)
 
     # --------------------------------------------------
+    # Process Confusion Pairs
+    # --------------------------------------------------
+    name_to_prompt_id = {v: k for k, v in prompt_category_dict.items()}
+    confusion_pairs = []
+    for pair in confusion_pairs_yaml:
+        if len(pair) == 2:
+            id_a = name_to_prompt_id.get(pair[0])
+            id_b = name_to_prompt_id.get(pair[1])
+            if id_a is not None and id_b is not None:
+                confusion_pairs.append((id_a, id_b))
+            else:
+                print(f"Warning: Confusion pair {pair} not found in custom_prompts targets. Skipping.")
+
+    # --------------------------------------------------
     # Process
     # --------------------------------------------------
 
@@ -356,17 +461,19 @@ if __name__ == "__main__":
         device=args.device,
         prompt_class_ids=prompt_class_ids,
         prompt_class_names=prompt_class_names,
-        void_class_ids=void_class_ids
+        void_class_ids=void_class_ids,
+        confusion_pairs=confusion_pairs
     )
     
     # --------------------------------------------------
     # Output
     # --------------------------------------------------
+    dataset_name = os.path.basename(args.image_dataset)
     if output_folder:
         final_results = finalize_evaluation(
             evaluation_accumulator,
             prompt_category_dict,
-            csv_path=os.path.join(output_folder, f"{args.model}_final_results.csv"),
+            csv_path=os.path.join(output_folder, f"{args.model}_{dataset_name}_results.csv"),
         )
     else:
         final_results = finalize_evaluation(
@@ -374,4 +481,4 @@ if __name__ == "__main__":
             prompt_category_dict,
         )
 
-    print_evaluation_results(final_results)
+    print_evaluation_results(final_results, args.model, dataset_name)
