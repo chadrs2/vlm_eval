@@ -93,59 +93,76 @@ def load_data(dataset_dir, annotation_file=None, image_subset=-1):
                 merged_prompts[item] = item
         custom_prompts = merged_prompts
 
-    # 5. Load Images and Masks
+    # 5. Collect image metadata only (NOT decoded pixels/masks).
+    # Decoding every image + every instance mask for the whole dataset upfront
+    # is what was blowing up memory on larger datasets (e.g. LaRS) -- it defeats
+    # the point of the batch_size used later. We now just record enough to
+    # decode each image lazily, per-batch, in run_experiment().
     image_ids = coco.getImgIds()
     if image_subset > 0:
         image_ids = image_ids[:image_subset]
 
-    images, image_paths, gt_masks, gt_class_ids, gt_class_names = [], [], [], [], []
+    image_paths = []
+    ann_ids_list = []  # ann ids per image, decoded on demand later
 
     for image_id in image_ids:
         img_meta = coco.loadImgs(image_id)[0]
         image_path = os.path.join(dataset_dir, img_meta["file_name"])
-        image = np.array(Image.open(image_path).convert("RGB"))
-        
         image_paths.append(image_path)
-        image_masks, image_class_ids, image_class_names = [], [], []
+        ann_ids_list.append(coco.getAnnIds(imgIds=[image_id]))
 
-        ann_ids = coco.getAnnIds(imgIds=[image_id])
-        annotations = coco.loadAnns(ann_ids)
+    return (
+        image_paths, ann_ids_list, coco, category_names, ignore_ids,
+        gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml,
+    )
 
-        for ann in annotations:
-            category_id = int(ann["category_id"])
-            if category_id in ignore_ids:
-                continue
+# ------------------------------------------------------------------------------------------
+# --------------------------------------- Lazy Decode --------------------------------------
+# ------------------------------------------------------------------------------------------
 
-            mask = coco.annToMask(ann)
-            mask = (mask > 0).astype(np.uint8)
+def load_image_and_gt(image_path, ann_ids, coco, category_names, ignore_ids):
+    """
+    Decode a single image + its ground-truth instance masks on demand.
+    This is the piece that used to run eagerly, for every image, inside load_data().
+    """
+    image = np.array(Image.open(image_path).convert("RGB"))
+    annotations = coco.loadAnns(ann_ids)
 
-            image_masks.append(mask)
-            image_class_ids.append(category_id)
-            image_class_names.append(category_names.get(category_id, "unknown"))
+    image_masks, image_class_ids, image_class_names = [], [], []
 
-        images.append(image)
-        gt_masks.append(image_masks)
-        gt_class_ids.append(image_class_ids)
-        gt_class_names.append(image_class_names)
+    for ann in annotations:
+        category_id = int(ann["category_id"])
+        if category_id in ignore_ids:
+            continue
 
-    return images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml
+        mask = coco.annToMask(ann)
+        mask = (mask > 0).astype(np.uint8)
+
+        image_masks.append(mask)
+        image_class_ids.append(category_id)
+        image_class_names.append(category_names.get(category_id, "unknown"))
+
+    return image, image_masks, image_class_ids, image_class_names
 
 # ------------------------------------------------------------------------------------------
 # ----------------------------------------- Debug ------------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def debug_visualize_random_image(images, masks, class_ids, class_names, alpha=0.45):
-    """Randomly visualize one image with instance masks and bounding boxes."""
+def debug_visualize_random_image(image_paths, ann_ids_list, coco, category_names, ignore_ids, alpha=0.45):
+    """Randomly visualize one image with instance masks and bounding boxes.
 
-    if len(images) == 0:
+    Decodes only the single chosen image on demand instead of requiring the
+    whole dataset to already be loaded into memory.
+    """
+
+    if len(image_paths) == 0:
         print("No images available.")
         return
 
-    image_idx = random.randrange(len(images))
-    image = images[image_idx]
-    image_masks = masks[image_idx]
-    image_class_ids = class_ids[image_idx]
-    image_class_names = class_names[image_idx]
+    image_idx = random.randrange(len(image_paths))
+    image, image_masks, image_class_ids, image_class_names = load_image_and_gt(
+        image_paths[image_idx], ann_ids_list[image_idx], coco, category_names, ignore_ids
+    )
 
     print(f"Visualizing image index: {image_idx}")
     print(f"Image shape: {image.shape}")
@@ -262,9 +279,10 @@ def debug_visualize_predictions(
 # ------------------------------------------------------------------------------------------
 
 def run_experiment(
-    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, 
+    image_paths, ann_ids_list, coco, category_names, ignore_ids, gt_class_dict,
     env="gsam", model_name="all", batch_size=8, device="cuda:0",
-    prompt_class_ids=None, prompt_class_names=None, void_class_ids=None, confusion_pairs=None
+    prompt_class_ids=None, prompt_class_names=None, void_class_ids=None, confusion_pairs=None,
+    metrics_csv_path=None,
 ):
     
     # --------------------------------------------------
@@ -294,64 +312,97 @@ def run_experiment(
     # Experiment Loop
     # --------------------------------------------------
 
+    num_batches = (len(image_paths) + batch_size - 1) // batch_size
+
     # 2. Main script controls the batch loop
-    for start_idx in range(0, len(images), batch_size):
-        end_idx = min(start_idx + batch_size, len(images))
-        
-        batch_images = images[start_idx:end_idx]
-        batch_image_paths = image_paths[start_idx:end_idx]
-        batch_gt_masks = gt_masks[start_idx:end_idx]
-        batch_gt_class_ids = gt_class_ids[start_idx:end_idx]
-        
-        start_time = time.perf_counter()
-        
-        # 3. Ask helper for predictions
-        batch_masks = helper.predict_batch_masks(
-            model=model,
-            current_model_name=model_name,
-            batch_images=batch_images,
-            batch_image_paths=batch_image_paths,
-            prompt_class_ids=prompt_class_ids,
-            prompt_class_names=prompt_class_names,
-            device=device
-        )
-        
-        runtime = time.perf_counter() - start_time
+    for batch_num in range(num_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, len(image_paths))
 
-        # --------------------------------------------------
-        # Debugger
-        # --------------------------------------------------
-        
-        # change variable to name of image
-        TARGET_DEBUG_IMAGE = None
+        try:
+            batch_image_paths = image_paths[start_idx:end_idx]
+            batch_ann_ids = ann_ids_list[start_idx:end_idx]
 
-        if TARGET_DEBUG_IMAGE is not None:
-            # dispaly predicted masks
-            debug_visualize_predictions(
+            # Decode this batch's images + GT masks now, not upfront for the
+            # whole dataset. Keeps peak memory to ~batch_size images at a
+            # time regardless of how large the dataset is.
+            batch_images, batch_gt_masks, batch_gt_class_ids = [], [], []
+            for img_path, ann_ids in zip(batch_image_paths, batch_ann_ids):
+                image, masks, class_ids, _ = load_image_and_gt(
+                    img_path, ann_ids, coco, category_names, ignore_ids
+                )
+                batch_images.append(image)
+                batch_gt_masks.append(masks)
+                batch_gt_class_ids.append(class_ids)
+
+            start_time = time.perf_counter()
+
+            # 3. Ask helper for predictions
+            batch_masks = helper.predict_batch_masks(
+                model=model,
+                current_model_name=model_name,
                 batch_images=batch_images,
                 batch_image_paths=batch_image_paths,
-                batch_masks=batch_masks,
                 prompt_class_ids=prompt_class_ids,
                 prompt_class_names=prompt_class_names,
-                target_image_name=TARGET_DEBUG_IMAGE
+                device=device
             )
 
-        # --------------------------------------------------
-        # Evaluation
-        # --------------------------------------------------
-        
-        # 4. Evaluate immediately
-        evaluation = evaluate_batch(
-            batch_masks=batch_masks,
-            batch_gt_masks=batch_gt_masks,
-            batch_class_ids=batch_gt_class_ids,
-            batch_images=batch_images,
-            class_ids=prompt_class_ids,
-            void_class_ids=void_class_ids,
-            accumulator=evaluation,
-            runtime=runtime,
-            confusion_pairs=confusion_pairs
-        )
+            runtime = time.perf_counter() - start_time
+
+            # --------------------------------------------------
+            # Debugger
+            # --------------------------------------------------
+
+            # change variable to name of image
+            TARGET_DEBUG_IMAGE = None
+
+            if TARGET_DEBUG_IMAGE is not None:
+                # dispaly predicted masks
+                debug_visualize_predictions(
+                    batch_images=batch_images,
+                    batch_image_paths=batch_image_paths,
+                    batch_masks=batch_masks,
+                    prompt_class_ids=prompt_class_ids,
+                    prompt_class_names=prompt_class_names,
+                    target_image_name=TARGET_DEBUG_IMAGE
+                )
+
+            # --------------------------------------------------
+            # Evaluation
+            # --------------------------------------------------
+
+            # 4. Evaluate immediately
+            evaluation = evaluate_batch(
+                batch_masks=batch_masks,
+                batch_gt_masks=batch_gt_masks,
+                batch_class_ids=batch_gt_class_ids,
+                batch_images=batch_images,
+                class_ids=prompt_class_ids,
+                void_class_ids=void_class_ids,
+                accumulator=evaluation,
+                runtime=runtime,
+                confusion_pairs=confusion_pairs,
+                # Write raw TP/FP/FN/TN after every batch. If the process gets
+                # killed partway through a large dataset, this file still has
+                # everything evaluated up to that point instead of nothing.
+                csv_path=metrics_csv_path,
+            )
+
+            # Explicitly drop this batch's decoded arrays before moving on.
+            del batch_images, batch_gt_masks, batch_gt_class_ids, batch_masks
+
+        except Exception as e:
+            # Don't let one bad batch (a corrupt image, a transient CUDA OOM,
+            # etc.) throw away every batch that was already evaluated.
+            # `evaluation` still holds everything accumulated so far, and
+            # metrics_csv_path (if set) already reflects it on disk.
+            print(
+                f"WARNING: batch {batch_num + 1}/{num_batches} "
+                f"(images {start_idx}:{end_idx}) failed with {type(e).__name__}: {e}"
+            )
+            print("Skipping this batch and continuing with the next one.")
+            continue
 
     # --------------------------------------------------
     # Cleanup
@@ -359,7 +410,7 @@ def run_experiment(
 
     # 5. Clean up the model to free GPU memory
     helper.cleanup_model(model)
-    
+
     return evaluation
 
 def arg_parser():
@@ -392,18 +443,23 @@ if __name__ == "__main__":
     # Load Data
     # --------------------------------------------------
     
-    images, image_paths, gt_masks, gt_class_ids, gt_class_names, gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml = load_data(
+    (
+        image_paths, ann_ids_list, coco, category_names, ignore_ids,
+        gt_class_dict, custom_prompts, void_class_ids, confusion_pairs_yaml,
+    ) = load_data(
         args.image_dataset,
         image_subset=args.image_subset,
     )
 
-    debug_visualize_random_image(images, gt_masks, gt_class_ids, gt_class_names)
+    debug_visualize_random_image(image_paths, ann_ids_list, coco, category_names, ignore_ids)
 
     # --------------------------------------------------
     # Input
     # --------------------------------------------------
     
     # Process custom prompts mapping directly here
+    ### prompts with GT associations receive positive ids
+    ### prompts without GT associations receive negative ids (skipped in metrics)
     name_to_id = {v: k for k, v in gt_class_dict.items()}
     prompt_category_dict = {}
     prompt_class_ids = []
@@ -447,38 +503,50 @@ if __name__ == "__main__":
     # Process
     # --------------------------------------------------
 
-    # Execute experiment batch loop and fetch evaluation accumulator
-    evaluation_accumulator = run_experiment(
-        images, 
-        image_paths,
-        gt_masks, 
-        gt_class_ids, 
-        gt_class_names,
-        gt_class_dict,
-        env=args.conda_env, 
-        model_name=args.model,
-        batch_size=args.batch_size,
-        device=args.device,
-        prompt_class_ids=prompt_class_ids,
-        prompt_class_names=prompt_class_names,
-        void_class_ids=void_class_ids,
-        confusion_pairs=confusion_pairs
-    )
-    
-    # --------------------------------------------------
-    # Output
-    # --------------------------------------------------
     dataset_name = os.path.basename(args.image_dataset)
-    if output_folder:
-        final_results = finalize_evaluation(
-            evaluation_accumulator,
-            prompt_category_dict,
-            csv_path=os.path.join(output_folder, f"{args.model}_{dataset_name}_results.csv"),
-        )
-    else:
-        final_results = finalize_evaluation(
-            evaluation_accumulator,
-            prompt_category_dict,
-        )
 
-    print_evaluation_results(final_results, args.model, dataset_name)
+    # Raw per-batch accumulator CSV (TP/FP/FN/TN only, no derived metrics yet).
+    # Gets overwritten after every batch, so if the run dies partway through
+    # a large dataset, this file still reflects everything evaluated so far.
+    raw_csv_path = (
+        os.path.join(output_folder, f"{args.model}_{dataset_name}_raw_progress.csv")
+        if output_folder else None
+    )
+
+    evaluation_accumulator = None
+    try:
+        # Execute experiment batch loop and fetch evaluation accumulator
+        evaluation_accumulator = run_experiment(
+            image_paths,
+            ann_ids_list,
+            coco,
+            category_names,
+            ignore_ids,
+            gt_class_dict,
+            env=args.conda_env,
+            model_name=args.model,
+            batch_size=args.batch_size,
+            device=args.device,
+            prompt_class_ids=prompt_class_ids,
+            prompt_class_names=prompt_class_names,
+            void_class_ids=void_class_ids,
+            confusion_pairs=confusion_pairs,
+            metrics_csv_path=raw_csv_path,
+        )
+    finally:
+        # Even on an exception (NOT a hard OOM kill -- nothing can catch
+        # SIGKILL -- but any normal Python-level error), still write out
+        # whatever was accumulated so far rather than losing it silently.
+        if evaluation_accumulator is not None:
+            if output_folder:
+                final_results = finalize_evaluation(
+                    evaluation_accumulator,
+                    prompt_category_dict,
+                    csv_path=os.path.join(output_folder, f"{args.model}_{dataset_name}_results.csv"),
+                )
+            else:
+                final_results = finalize_evaluation(
+                    evaluation_accumulator,
+                    prompt_category_dict,
+                )
+            print_evaluation_results(final_results, args.model, dataset_name)

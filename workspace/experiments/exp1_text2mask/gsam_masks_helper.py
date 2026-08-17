@@ -116,7 +116,7 @@ def predict_yoloe(model, images, prompt_class_ids, device):
     for image, result in zip(images, results):
         IMG_W, IMG_H = image.shape[1], image.shape[0]
         masks = {}
-        if result[0].masks is None:
+        if result.masks is None:
             batch_masks.append(masks)
             continue
         
@@ -145,6 +145,10 @@ def predict_sam3(model, images, prompt_class_ids, prompt_class_names, device):
         
         model.set_image(image)
         results = model(text=prompt_class_names)
+        if results[0].masks is None:
+            batch_masks.append(masks)
+            continue
+
         sam3_masks = results[0].masks.data 
         sam3_cls = results[0].boxes.cls
         for mask, cls in zip(sam3_masks, sam3_cls):
@@ -215,6 +219,11 @@ def _get_fsam_masks(fsam_model, images, device):
     buffer = 10
     kernel = np.ones((5, 5), np.uint8)
     for image, result in zip(images, fsam_results):
+        if result.masks is None:
+            all_fsam_masks.append(torch.empty(0, dtype=torch.bool))
+            all_img_masks.append([])
+            continue
+
         fsam_masks = result.masks.data.bool()
         all_fsam_masks.append(fsam_masks)
         
@@ -251,6 +260,10 @@ def _get_clip_mask_embs(fsam_model, clip_model, images, device):
     all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
     
     for img_masks in all_img_masks:
+        if len(img_masks) == 0:
+            clip_mask_embs.append(None)
+            continue
+
         preprocessed = [clip_model.image_preprocess(img).unsqueeze(0) for img in img_masks]
         clip_input_batch = torch.cat(preprocessed, dim=0).to(device, non_blocking=True)
 
@@ -269,9 +282,13 @@ def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
     batch_masks = []
     for img_idx in range(len(images)):
         IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
+        merged_masks = {}
+        if clip_mask_embs[img_idx] is None:
+            batch_masks.append(merged_masks)
+            continue
+
         similarity = F.cosine_similarity(clip_mask_embs[img_idx].unsqueeze(1), clip_txt_embs.unsqueeze(0), dim=-1)
 
-        merged_masks = {}
         for c_idx, class_name in enumerate(prompt_class_names):
             gt_class_id = prompt_class_ids[c_idx]
             class_sims = similarity[:, c_idx]
@@ -298,6 +315,10 @@ def _get_siglip_mask_embs(fsam_model, siglip_processor, siglip_model, images, de
     all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
     
     for img_masks in all_img_masks:
+        if len(img_masks) == 0:
+            siglip_mask_embs.append(None)
+            continue
+
         image_inputs = siglip_processor(images=img_masks, return_tensors="pt", padding="max_length").to(device)
         with torch.no_grad():
             image_embeds = siglip_model.get_image_features(**image_inputs)
@@ -319,9 +340,13 @@ def predict_siglip(model, images, prompt_class_ids, prompt_class_names, device):
     batch_masks = []
     for img_idx in range(len(images)):
         IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
+        merged_masks = {}
+        if siglip_mask_embs[img_idx] is None:
+            batch_masks.append(merged_masks)
+            continue
+
         similarity = F.cosine_similarity(siglip_mask_embs[img_idx].unsqueeze(1), siglip_text_embeds.unsqueeze(0), dim=-1)
 
-        merged_masks = {}
         for c_idx, class_name in enumerate(prompt_class_names):
             gt_class_id = prompt_class_ids[c_idx]
             class_sims = similarity[:, c_idx]
