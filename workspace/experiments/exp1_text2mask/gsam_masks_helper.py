@@ -108,16 +108,6 @@ LOAD_MODEL_ENUM = {
 # ------------------------------------------------------------------------------------------
 # ----------------------------------- Model Predictions ------------------------------------
 # ------------------------------------------------------------------------------------------
-#
-# Every predict_* function below now returns, per image, a dict of:
-#     { class_id: [(mask, score), (mask, score), ...] }
-# instead of the old score-less `{ class_id: [mask, mask, ...] }`. Each
-# instance keeps its own confidence so metrics.evaluate_batch can rank
-# predictions and compute a real AP curve, instead of only pixel-union
-# IoU/F1. `score` is a plain python float in roughly [0, 1] -- higher is
-# more confident -- but the exact scale differs per model (detector
-# objectness/box conf vs. cosine similarity), so scores should only be
-# compared *within* a single model's results, never across models.
 
 def predict_yoloe(model, images, prompt_class_ids, device):
     results = model.predict(images, conf=0.1)
@@ -195,6 +185,14 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
             box_threshold=BOX_TRESHOLD, text_threshold=TEXT_TRESHOLD, device=device
         )
         
+        # ---------------------------------------------------------
+        # NEW SAFETY CHECK: If no boxes are found, skip SAM entirely
+        # ---------------------------------------------------------
+        if boxes.shape[0] == 0:
+            batch_masks.append({})
+            continue
+        # ---------------------------------------------------------
+        
         model[1].set_image(image_source)
         boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes) * torch.Tensor([IMG_W, IMG_H, IMG_W, IMG_H])
         transformed_boxes = model[1].transform.apply_boxes_torch(boxes_xyxy, image_source.shape[:2]).to(device)
@@ -203,9 +201,7 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
         ) 
 
         masks = {}
-        # `logits` holds GroundingDINO's per-box confidence (the same score
-        # that BOX_TRESHOLD is already filtering on), so it's a natural
-        # per-instance confidence to carry through to AP.
+        # `logits` holds GroundingDINO's per-box confidence...
         for mask, text, logit in zip(gsam_masks, phrases, logits):
             score = float(logit.item())
             # Iterate through the custom prompts directly instead of splitting by space

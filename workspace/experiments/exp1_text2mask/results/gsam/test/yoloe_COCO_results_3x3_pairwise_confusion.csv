@@ -1,0 +1,42 @@
+Pair: vegetation vs mountain
+,Pred: vegetation,Pred: mountain,Pred: Neither
+GT: vegetation,0,0,0
+GT: mountain,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: pier vs wharf
+,Pred: pier,Pred: wharf,Pred: Neither
+GT: pier,0,0,0
+GT: wharf,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: pier vs float
+,Pred: pier,Pred: float,Pred: Neither
+GT: pier,0,0,0
+GT: float,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: wharf vs float
+,Pred: wharf,Pred: float,Pred: Neither
+GT: wharf,0,0,0
+GT: float,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: boat vs buoy
+,Pred: boat,Pred: buoy,Pred: Neither
+GT: boat,0,0,0
+GT: buoy,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: buoy vs float
+,Pred: buoy,Pred: float,Pred: Neither
+GT: buoy,0,0,0
+GT: float,0,0,0
+GT: Neither,0,0,2419640
+
+Pair: shore-natural vs shore-artificial
+,Pred: shore-natural,Pred: shore-artificial,Pred: Neither
+GT: shore-natural,0,0,0
+GT: shore-artificial,0,0,0
+GT: Neither,0,69119,2350521
+
