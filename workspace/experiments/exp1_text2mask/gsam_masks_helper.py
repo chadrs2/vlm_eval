@@ -108,6 +108,16 @@ LOAD_MODEL_ENUM = {
 # ------------------------------------------------------------------------------------------
 # ----------------------------------- Model Predictions ------------------------------------
 # ------------------------------------------------------------------------------------------
+#
+# Every predict_* function below now returns, per image, a dict of:
+#     { class_id: [(mask, score), (mask, score), ...] }
+# instead of the old score-less `{ class_id: [mask, mask, ...] }`. Each
+# instance keeps its own confidence so metrics.evaluate_batch can rank
+# predictions and compute a real AP curve, instead of only pixel-union
+# IoU/F1. `score` is a plain python float in roughly [0, 1] -- higher is
+# more confident -- but the exact scale differs per model (detector
+# objectness/box conf vs. cosine similarity), so scores should only be
+# compared *within* a single model's results, never across models.
 
 def predict_yoloe(model, images, prompt_class_ids, device):
     results = model.predict(images, conf=0.1)
@@ -122,17 +132,19 @@ def predict_yoloe(model, images, prompt_class_ids, device):
         
         yoloe_masks = result.masks.data
         yoloe_cls = result.boxes.cls
-        for mask, cls in zip(yoloe_masks, yoloe_cls):
+        yoloe_conf = result.boxes.conf
+        for mask, cls, conf in zip(yoloe_masks, yoloe_cls, yoloe_conf):
             class_idx = int(cls.item())
             gt_class_id = prompt_class_ids[class_idx]
+            score = float(conf.item())
             
             mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
             mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_resized)
+                masks[gt_class_id].append((mask_resized, score))
             else:
-                masks[gt_class_id] = [mask_resized]
+                masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
     
     return batch_masks
@@ -151,17 +163,19 @@ def predict_sam3(model, images, prompt_class_ids, prompt_class_names, device):
 
         sam3_masks = results[0].masks.data 
         sam3_cls = results[0].boxes.cls
-        for mask, cls in zip(sam3_masks, sam3_cls):
+        sam3_conf = results[0].boxes.conf
+        for mask, cls, conf in zip(sam3_masks, sam3_cls, sam3_conf):
             class_idx = int(cls.item())  
             gt_class_id = prompt_class_ids[class_idx]
+            score = float(conf.item())
 
             mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
             mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_resized)
+                masks[gt_class_id].append((mask_resized, score))
             else:
-                masks[gt_class_id] = [mask_resized]
+                masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
         
     return batch_masks
@@ -189,7 +203,11 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
         ) 
 
         masks = {}
-        for mask, text in zip(gsam_masks, phrases):
+        # `logits` holds GroundingDINO's per-box confidence (the same score
+        # that BOX_TRESHOLD is already filtering on), so it's a natural
+        # per-instance confidence to carry through to AP.
+        for mask, text, logit in zip(gsam_masks, phrases, logits):
+            score = float(logit.item())
             # Iterate through the custom prompts directly instead of splitting by space
             for class_name in prompt_class_names:
                 # Substring matching handles Grounding DINO's tendency to slightly alter phrases
@@ -201,9 +219,9 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
                     mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
     
                     if gt_class_id in masks:
-                        masks[gt_class_id].append(mask_resized)
+                        masks[gt_class_id].append((mask_resized, score))
                     else:
-                        masks[gt_class_id] = [mask_resized]
+                        masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
                 
     return batch_masks
@@ -296,16 +314,25 @@ def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
                 
             if len(passing_indices) == 0:
                 continue
-        
-            selected_masks = all_fsam_masks[img_idx][passing_indices]
-            combined_mask = selected_masks.any(dim=0)  
-            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8) 
-            mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
-            if gt_class_id in merged_masks:
-                merged_masks[gt_class_id].append(mask_resized)
-            else:
-                merged_masks[gt_class_id] = [mask_resized]
+            # NOTE: previously all passing FastSAM proposals were OR'd into a
+            # single blob per class here (`selected_masks.any(dim=0)`),
+            # discarding instance identity and confidence. That's fine for
+            # the pixel-union IoU/F1 metrics (which still OR everything back
+            # together downstream, so those numbers are unaffected) but it
+            # makes ranked AP impossible. Each passing proposal is now kept
+            # as its own scored instance instead.
+            for idx in passing_indices:
+                mask = all_fsam_masks[img_idx][idx]
+                score = float(class_sims[idx].item())
+
+                mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+                mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
+
+                if gt_class_id in merged_masks:
+                    merged_masks[gt_class_id].append((mask_resized, score))
+                else:
+                    merged_masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(merged_masks)
         
     return batch_masks
@@ -354,16 +381,20 @@ def predict_siglip(model, images, prompt_class_ids, prompt_class_names, device):
                 
             if len(passing_indices) == 0:
                 continue
-        
-            selected_masks = all_fsam_masks[img_idx][passing_indices]
-            combined_mask = selected_masks.any(dim=0)
-            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
-            mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
-            if gt_class_id in merged_masks:
-                merged_masks[gt_class_id].append(mask_resized)
-            else:
-                merged_masks[gt_class_id] = [mask_resized]
+            # Same un-merging as predict_clip above -- keep each passing
+            # FastSAM proposal as its own (mask, score) instance.
+            for idx in passing_indices:
+                mask = all_fsam_masks[img_idx][idx]
+                score = float(class_sims[idx].item())
+
+                mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+                mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
+
+                if gt_class_id in merged_masks:
+                    merged_masks[gt_class_id].append((mask_resized, score))
+                else:
+                    merged_masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(merged_masks)
         
     return batch_masks

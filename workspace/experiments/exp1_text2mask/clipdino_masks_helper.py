@@ -75,7 +75,10 @@ def _predict_clipdino(model, images, prompt_class_ids, prompt_class_names, devic
             mode="bilinear",
             align_corners=False,
         )[..., :h, :w]
-        class_map = output[0].argmax(dim=0).numpy()  
+        
+        # Convert logits to probabilities to calculate confidence scores
+        probs_np = F.softmax(output[0], dim=0).numpy()
+        class_map = probs_np.argmax(axis=0)
  
         masks = {}
         for c_idx, class_name in enumerate(prompt_class_names):
@@ -89,11 +92,17 @@ def _predict_clipdino(model, images, prompt_class_ids, prompt_class_names, devic
                 (IMG_W, IMG_H),
                 interpolation=cv2.INTER_NEAREST,
             )
+            
+            # Calculate instance score as mean probability of the masked pixels
+            if binary_mask.any():
+                score = float(probs_np[vocab_idx][binary_mask].mean())
+            else:
+                score = 0.0
  
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_resized)
+                masks[gt_class_id].append((mask_resized, score))
             else:
-                masks[gt_class_id] = [mask_resized]
+                masks[gt_class_id] = [(mask_resized, score)]
  
         batch_masks.append(masks)
  

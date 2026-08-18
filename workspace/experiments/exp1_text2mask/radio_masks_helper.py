@@ -98,11 +98,17 @@ def _predict_radio(model, images, prompt_class_ids, prompt_class_names, device,a
  
             binary_mask = heatmap_resized > threshold
             mask_np = (binary_mask.astype(np.uint8) * 255)  
+            
+            # Calculate instance score as mean confidence within the generated heatmap mask
+            if binary_mask.any():
+                score = float(heatmap_resized[binary_mask].mean())
+            else:
+                score = 0.0
  
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_np)
+                masks[gt_class_id].append((mask_np, score))
             else:
-                masks[gt_class_id] = [mask_np]
+                masks[gt_class_id] = [(mask_np, score)]
  
         batch_masks.append(masks)
  
