@@ -31,6 +31,13 @@ from huggingface_hub import hf_hub_download
 # segment anything
 from segment_anything.segment_anything import build_sam, SamPredictor, build_sam_vit_b 
 
+# raise specific torch flags to optimize CLIP performance
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+torch.set_float32_matmul_precision('highest')
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 # ------------------------------------------------------------------------------------------
 # -------------------------------------- Load Models ---------------------------------------
 # ------------------------------------------------------------------------------------------
@@ -325,13 +332,6 @@ def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
             if len(passing_indices) == 0:
                 continue
 
-            # NOTE: previously all passing FastSAM proposals were OR'd into a
-            # single blob per class here (`selected_masks.any(dim=0)`),
-            # discarding instance identity and confidence. That's fine for
-            # the pixel-union IoU/F1 metrics (which still OR everything back
-            # together downstream, so those numbers are unaffected) but it
-            # makes ranked AP impossible. Each passing proposal is now kept
-            # as its own scored instance instead.
             for idx in passing_indices:
                 mask = all_fsam_masks[img_idx][idx]
                 score = float(class_sims[idx].item())
@@ -344,7 +344,7 @@ def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
                 else:
                     merged_masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(merged_masks)
-        
+
     return batch_masks
 
 def _get_siglip_mask_embs(fsam_model, siglip_processor, siglip_model, images, device):
