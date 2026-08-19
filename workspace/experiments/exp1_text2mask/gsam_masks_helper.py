@@ -223,16 +223,30 @@ def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, devic
     return batch_masks
 
 def _get_fsam_masks(fsam_model, images, device):
+    """
+    Run FastSAM and build per-instance crops for a batch of images.
+
+    NOTE: images in a batch can come from different source datasets (or
+    just vary in size/aspect ratio within one dataset -- COCO, LaRS, and
+    GOOSE all have mixed resolutions), so we run FastSAM one image at a
+    time instead of handing the whole batch to `fsam_model` in one call.
+    Passing a mixed-resolution list through with a single `imgsz` forces
+    every image but the first onto that first image's canvas, distorting
+    (stretching/squashing) their aspect ratio before segmentation. Looping
+    keeps each image at its own native resolution -- true full-resolution,
+    fair, apples-to-apples inference across datasets.
+    """
     all_img_masks = []
     all_fsam_masks = []
-    IMG_W, IMG_H = images[0].shape[1], images[0].shape[0]
-    fsam_results = fsam_model(
-        images, device=device, retina_masks=True, imgsz=(IMG_H, IMG_W), conf=0.003, iou=0.25, max_det=100,
-    )
-    
+
     buffer = 10
     kernel = np.ones((5, 5), np.uint8)
-    for image, result in zip(images, fsam_results):
+    for image in images:
+        IMG_W, IMG_H = image.shape[1], image.shape[0]
+        result = fsam_model(
+            [image], device=device, retina_masks=True, imgsz=(IMG_H, IMG_W), conf=0.003, iou=0.25, max_det=100,
+        )[0]
+
         if result.masks is None:
             all_fsam_masks.append(torch.empty(0, dtype=torch.bool))
             all_img_masks.append([])
