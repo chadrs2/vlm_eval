@@ -31,12 +31,16 @@ from huggingface_hub import hf_hub_download
 # segment anything
 from segment_anything.segment_anything import build_sam, SamPredictor, build_sam_vit_b 
 
-import time
-from metrics import (
-    evaluate_batch,
-    finalize_evaluation,
-    print_evaluation_results,
-)
+# raise specific torch flags to optimize CLIP performance
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+torch.set_float32_matmul_precision('highest')
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# ------------------------------------------------------------------------------------------
+# -------------------------------------- Load Models ---------------------------------------
+# ------------------------------------------------------------------------------------------
 
 def load_yoloe(all_class_names, device):
     model = YOLOE("yoloe-26m-seg.pt").to(device=device)
@@ -51,7 +55,7 @@ def load_sam3(all_class_names, device):
         "model": "/workspace/models/sam3.pt",
         "quantize": 16,  # Use FP16 for faster inference
         "device": device,
-        "save": False,#True,
+        "save": False,
     }
     model = SAM3SemanticPredictor(overrides=overrides)
     return model
@@ -64,27 +68,33 @@ def _load_model_hf(repo_id, filename, ckpt_config_filename, device='cpu'):
     args.device = device
 
     cache_file = hf_hub_download(repo_id=repo_id, filename=filename)
-    checkpoint = torch.load(cache_file, map_location=device)#'cpu')
+    checkpoint = torch.load(cache_file, map_location=device)
     log = model.load_state_dict(clean_state_dict(checkpoint['model']), strict=False)
     print("Model loaded from {} \n => {}".format(cache_file, log))
     _ = model.eval()
-    return model   
+    return model
 
 def load_gsam(all_class_names, device):
-    # Load Grounding-DINO
     ckpt_repo_id = "ShilongLiu/GroundingDINO"
-    ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
-    ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
-    groundingdino_model = _load_model_hf(ckpt_repo_id, ckpt_filenmae, ckpt_config_filename, device=device)
-    sam_checkpoint = '/workspace/models/sam_vit_b_01ec64.pth' # https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+    
+    ckpt_filename = "groundingdino_swint_ogc.pth"
+    ckpt_config_filename = "GroundingDINO_SwinT_OGC.cfg.py" 
+
+    # swinB weights
+    # ckpt_filename = "groundingdino_swinb_cogcoor.pth"
+    # ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
+
+    groundingdino_model = _load_model_hf(ckpt_repo_id, ckpt_filename, ckpt_config_filename, device=device)
+    
+    sam_checkpoint = '/workspace/models/sam_vit_b_01ec64.pth' 
     sam = build_sam_vit_b(checkpoint=sam_checkpoint)
     sam.to(device=device)
     sam_predictor = SamPredictor(sam)
     return [groundingdino_model, sam_predictor]
 
 def load_clip(all_class_names, device):
-    fastsam_model = FastSAM(model="FastSAM-s.pt")
     clip_model = CLIP(size="ViT-B/32", device=device)
+    fastsam_model = FastSAM(model="FastSAM-s.pt")
     return [fastsam_model, clip_model]
 
 def load_siglip(all_class_names, device):
@@ -102,78 +112,73 @@ LOAD_MODEL_ENUM = {
     "siglip": load_siglip
 }
 
-def predict_yoloe(model, images, gt_class_ids, device):
-    
+# ------------------------------------------------------------------------------------------
+# ----------------------------------- Model Predictions ------------------------------------
+# ------------------------------------------------------------------------------------------
+
+def predict_yoloe(model, images, prompt_class_ids, device):
     results = model.predict(images, conf=0.1)
-    
     batch_masks = []
     
     for image, result in zip(images, results):
-        # annotated_img = result.plot()
-        # plt.imshow(annotated_img)
-        # plt.show()
         IMG_W, IMG_H = image.shape[1], image.shape[0]
-        
         masks = {}
-        if result[0].masks is None:
+        if result.masks is None:
             batch_masks.append(masks)
             continue
         
         yoloe_masks = result.masks.data
         yoloe_cls = result.boxes.cls
-        for mask, cls in zip(yoloe_masks, yoloe_cls):
-            class_idx = int(cls.item())  # Get class idx
-            gt_class_id = gt_class_ids[class_idx]
+        yoloe_conf = result.boxes.conf
+        for mask, cls, conf in zip(yoloe_masks, yoloe_cls, yoloe_conf):
+            class_idx = int(cls.item())
+            gt_class_id = prompt_class_ids[class_idx]
+            score = float(conf.item())
             
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-            mask_resized = cv2.resize(
-                mask_np, 
-                (IMG_W, IMG_H), 
-                interpolation=cv2.INTER_NEAREST
-            )
+            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_resized)
+                masks[gt_class_id].append((mask_resized, score))
             else:
-                masks[gt_class_id] = [mask_resized]
+                masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
     
     return batch_masks
 
-
-def predict_sam3(model, images, gt_class_ids, gt_class_names, device):
+def predict_sam3(model, images, prompt_class_ids, prompt_class_names, device):
     batch_masks = []
     for image in images:
         IMG_W, IMG_H = image.shape[1], image.shape[0]
-        
         masks = {}
         
         model.set_image(image)
-        results = model(text=gt_class_names)
-        sam3_masks = results[0].masks.data # num_found_prompts x H x W
-        sam3_cls = results[0].boxes.cls
-        for mask, cls in zip(sam3_masks, sam3_cls):
-            class_idx = int(cls.item())  # Get class idx
-            gt_class_id = gt_class_ids[class_idx]
+        results = model(text=prompt_class_names)
+        if results[0].masks is None:
+            batch_masks.append(masks)
+            continue
 
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-            mask_resized = cv2.resize(
-                mask_np, 
-                (IMG_W, IMG_H), 
-                interpolation=cv2.INTER_NEAREST
-            )
+        sam3_masks = results[0].masks.data 
+        sam3_cls = results[0].boxes.cls
+        sam3_conf = results[0].boxes.conf
+        for mask, cls, conf in zip(sam3_masks, sam3_cls, sam3_conf):
+            class_idx = int(cls.item())  
+            gt_class_id = prompt_class_ids[class_idx]
+            score = float(conf.item())
+
+            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
 
             if gt_class_id in masks:
-                masks[gt_class_id].append(mask_resized)
+                masks[gt_class_id].append((mask_resized, score))
             else:
-                masks[gt_class_id] = [mask_resized]
+                masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
         
     return batch_masks
 
-        
-def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
-    TEXT_PROMPT = " . ".join(gt_class_names)
+def predict_gsam(model, image_paths, prompt_class_ids, prompt_class_names, device):
+    TEXT_PROMPT = " . ".join(prompt_class_names)
     BOX_TRESHOLD = 0.3
     TEXT_TRESHOLD = 0.25
     
@@ -182,73 +187,78 @@ def predict_gsam(model, image_paths, gt_class_ids, gt_class_names, device):
         image_source, image = load_image(image_path)
         IMG_H, IMG_W, _ = image_source.shape
         
-        # G-DINO Box Predictions
         boxes, logits, phrases = predict(
-            model=model[0], 
-            image=image, 
-            caption=TEXT_PROMPT, 
-            box_threshold=BOX_TRESHOLD, 
-            text_threshold=TEXT_TRESHOLD,
-            device=device
+            model=model[0], image=image, caption=TEXT_PROMPT, 
+            box_threshold=BOX_TRESHOLD, text_threshold=TEXT_TRESHOLD, device=device
         )
         
-        # SAM Mask Predictions
+        # ---------------------------------------------------------
+        # NEW SAFETY CHECK: If no boxes are found, skip SAM entirely
+        # ---------------------------------------------------------
+        if boxes.shape[0] == 0:
+            batch_masks.append({})
+            continue
+        # ---------------------------------------------------------
+        
         model[1].set_image(image_source)
-        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes) * \
-            torch.Tensor([IMG_W, IMG_H, IMG_W, IMG_H])
-        transformed_boxes = model[1].transform.apply_boxes_torch(
-            boxes_xyxy, 
-            image_source.shape[:2]
-        ).to(device)
+        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes) * torch.Tensor([IMG_W, IMG_H, IMG_W, IMG_H])
+        transformed_boxes = model[1].transform.apply_boxes_torch(boxes_xyxy, image_source.shape[:2]).to(device)
         gsam_masks, _, _ = model[1].predict_torch(
-            point_coords = None,
-            point_labels = None,
-            boxes = transformed_boxes,
-            multimask_output = False,
-        ) # num_masks x 1 x H x W
+            point_coords = None, point_labels = None, boxes = transformed_boxes, multimask_output = False,
+        ) 
 
         masks = {}
-        for mask, text in zip(gsam_masks, phrases):
-            words = text.split(" ") if " " in text else [text]
-            for st in words:
-                if st in gt_class_names:
-                    class_idx = gt_class_names.index(st)
-                    gt_class_id = gt_class_ids[class_idx]
+        # `logits` holds GroundingDINO's per-box confidence...
+        for mask, text, logit in zip(gsam_masks, phrases, logits):
+            score = float(logit.item())
+            # Iterate through the custom prompts directly instead of splitting by space
+            for class_name in prompt_class_names:
+                # Substring matching handles Grounding DINO's tendency to slightly alter phrases
+                if class_name.lower() in text.lower() or text.lower() in class_name.lower():
+                    class_idx = prompt_class_names.index(class_name)
+                    gt_class_id = prompt_class_ids[class_idx]
                     
-                    mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-                    mask_resized = cv2.resize(
-                        mask_np, 
-                        (IMG_W, IMG_H), 
-                        interpolation=cv2.INTER_NEAREST
-                    )
+                    mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8) 
+                    mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
     
                     if gt_class_id in masks:
-                        masks[gt_class_id].append(mask_resized)
+                        masks[gt_class_id].append((mask_resized, score))
                     else:
-                        masks[gt_class_id] = [mask_resized]
-        
+                        masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(masks)
                 
     return batch_masks
 
-
 def _get_fsam_masks(fsam_model, images, device):
+    """
+    Run FastSAM and build per-instance crops for a batch of images.
+
+    NOTE: images in a batch can come from different source datasets (or
+    just vary in size/aspect ratio within one dataset -- COCO, LaRS, and
+    GOOSE all have mixed resolutions), so we run FastSAM one image at a
+    time instead of handing the whole batch to `fsam_model` in one call.
+    Passing a mixed-resolution list through with a single `imgsz` forces
+    every image but the first onto that first image's canvas, distorting
+    (stretching/squashing) their aspect ratio before segmentation. Looping
+    keeps each image at its own native resolution -- true full-resolution,
+    fair, apples-to-apples inference across datasets.
+    """
     all_img_masks = []
     all_fsam_masks = []
-    IMG_W, IMG_H = images[0].shape[1], images[0].shape[0]
-    fsam_results = fsam_model(
-        images,
-        device=device,
-        retina_masks=True,
-        imgsz=(IMG_H, IMG_W),
-        conf=0.003,
-        iou=0.25,
-        max_det=100,
-    )
-    
+
     buffer = 10
     kernel = np.ones((5, 5), np.uint8)
-    for image, result in zip(images, fsam_results):
+    for image in images:
+        IMG_W, IMG_H = image.shape[1], image.shape[0]
+        result = fsam_model(
+            [image], device=device, retina_masks=True, imgsz=(IMG_H, IMG_W), conf=0.003, iou=0.25, max_det=100,
+        )[0]
+
+        if result.masks is None:
+            all_fsam_masks.append(torch.empty(0, dtype=torch.bool))
+            all_img_masks.append([])
+            continue
+
         fsam_masks = result.masks.data.bool()
         all_fsam_masks.append(fsam_masks)
         
@@ -258,18 +268,15 @@ def _get_fsam_masks(fsam_model, images, device):
             if mask_bool.sum() == 0:
                 continue
     
-            # bounding box and dilation
             mask_u8 = (mask_bool.astype(np.uint8) * 255)
             x, y, w, h = cv2.boundingRect(mask_u8)
             x1, y1 = max(0, x - buffer), max(0, y - buffer)
             x2, y2 = min(IMG_W, x + w + buffer), min(IMG_H, y + h + buffer)
     
-    
             dilated = cv2.dilate(mask_u8, kernel, iterations=3).astype(bool)
             if not dilated.any():
                 continue
     
-            # crop and zero-out background inside crop
             cropped_bb = image[y1:y2, x1:x2].copy()
             roi = dilated[y1:y2, x1:x2]
             cropped_bb[~roi] = 0
@@ -279,19 +286,19 @@ def _get_fsam_masks(fsam_model, images, device):
                 pil_crop = Image.fromarray((np.clip(cropped_bb, 0, 255)).astype(np.uint8))
     
             img_masks.append(pil_crop)
-        
         all_img_masks.append(img_masks)
     
     return all_img_masks, all_fsam_masks
 
-
 def _get_clip_mask_embs(fsam_model, clip_model, images, device):
     clip_mask_embs = []
-    
     all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
     
     for img_masks in all_img_masks:
-        # preprocess and batch for CLIP
+        if len(img_masks) == 0:
+            clip_mask_embs.append(None)
+            continue
+
         preprocessed = [clip_model.image_preprocess(img).unsqueeze(0) for img in img_masks]
         clip_input_batch = torch.cat(preprocessed, dim=0).to(device, non_blocking=True)
 
@@ -300,275 +307,136 @@ def _get_clip_mask_embs(fsam_model, clip_model, images, device):
         clip_mask_embs.append(fsam_clip_embs_tensor)
     return clip_mask_embs, all_fsam_masks
 
-def predict_clip(model, images, gt_class_ids, gt_class_names, device):
+def predict_clip(model, images, prompt_class_ids, prompt_class_names, device):
     clip_mask_embs, all_fsam_masks = _get_clip_mask_embs(model[0], model[1], images, device)
-    toks = model[1].tokenize(gt_class_names)
+    clip_prompts = [f"a photo of a {class_name}" for class_name in prompt_class_names]
+    toks = model[1].tokenize(clip_prompts)
     clip_txt_embs = model[1].encode_text(toks)
     
     COSSIM_THRESHOLD = 0.25
     batch_masks = []
     for img_idx in range(len(images)):
         IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
-        similarity = F.cosine_similarity(
-            clip_mask_embs[img_idx].unsqueeze(1), 
-            clip_txt_embs.unsqueeze(0), 
-            dim=-1
-        )
-
         merged_masks = {}
-        for c_idx, class_name in enumerate(gt_class_names):
-            gt_class_id = gt_class_ids[c_idx]
-            
+        if clip_mask_embs[img_idx] is None:
+            batch_masks.append(merged_masks)
+            continue
+
+        similarity = F.cosine_similarity(clip_mask_embs[img_idx].unsqueeze(1), clip_txt_embs.unsqueeze(0), dim=-1)
+
+        for c_idx, class_name in enumerate(prompt_class_names):
+            gt_class_id = prompt_class_ids[c_idx]
             class_sims = similarity[:, c_idx]
-            
             passing_indices = (class_sims > COSSIM_THRESHOLD).nonzero(as_tuple=True)[0]
                 
             if len(passing_indices) == 0:
                 continue
-        
-            # Extract masks above threshold: shape [K, H, W]
-            selected_masks = all_fsam_masks[img_idx][passing_indices]
-            
-            # Merge selected masks along dimension 0 using bitwise OR
-            combined_mask = selected_masks.any(dim=0)  # Equivalent to bitwise OR reduction across mask axis
-            
-            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-            mask_resized = cv2.resize(
-                mask_np, 
-                (IMG_W, IMG_H), 
-                interpolation=cv2.INTER_NEAREST
-            )
 
-            if gt_class_id in merged_masks:
-                merged_masks[gt_class_id].append(mask_resized)
-            else:
-                merged_masks[gt_class_id] = [mask_resized]
-    
+            for idx in passing_indices:
+                mask = all_fsam_masks[img_idx][idx]
+                score = float(class_sims[idx].item())
+
+                mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+                mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
+
+                if gt_class_id in merged_masks:
+                    merged_masks[gt_class_id].append((mask_resized, score))
+                else:
+                    merged_masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(merged_masks)
-        
-    return batch_masks
 
+    return batch_masks
 
 def _get_siglip_mask_embs(fsam_model, siglip_processor, siglip_model, images, device):
     siglip_mask_embs = []
-    
     all_img_masks, all_fsam_masks = _get_fsam_masks(fsam_model, images, device)
     
     for img_masks in all_img_masks:
-        # preprocess and batch for SigLIP
-        image_inputs = siglip_processor(
-            images=img_masks, 
-            return_tensors="pt", 
-            padding="max_length"
-        ).to(device)
+        if len(img_masks) == 0:
+            siglip_mask_embs.append(None)
+            continue
+
+        image_inputs = siglip_processor(images=img_masks, return_tensors="pt", padding="max_length").to(device)
         with torch.no_grad():
             image_embeds = siglip_model.get_image_features(**image_inputs)
             image_embeds = F.normalize(image_embeds, p=2, dim=-1)
-            
         siglip_mask_embs.append(image_embeds)
     
     return siglip_mask_embs, all_fsam_masks
 
-def predict_siglip(model, images, gt_class_ids, gt_class_names, device):
-    siglip_mask_embs, all_fsam_masks = _get_siglip_mask_embs(
-        model[0], # fastsam 
-        model[1], # processor
-        model[2], # model
-        images, 
-        device
-    )
+def predict_siglip(model, images, prompt_class_ids, prompt_class_names, device):
+    siglip_mask_embs, all_fsam_masks = _get_siglip_mask_embs(model[0], model[1], model[2], images, device)
     
-    text_inputs = model[1](
-        text=gt_class_names, 
-        return_tensors="pt", 
-        padding="max_length"
-    ).to(device)
+    siglip_prompts = [f"a photo of a {class_name}" for class_name in prompt_class_names]
+    text_inputs = model[1](text=siglip_prompts, return_tensors="pt", padding="max_length").to(device)
     with torch.no_grad():
         siglip_text_embeds = model[2].get_text_features(**text_inputs)
         siglip_text_embeds = F.normalize(siglip_text_embeds, p=2, dim=-1)
-    
     
     COSSIM_THRESHOLD = 0.06
     batch_masks = []
     for img_idx in range(len(images)):
         IMG_W, IMG_H = images[img_idx].shape[1], images[img_idx].shape[0]
-        similarity = F.cosine_similarity(
-            siglip_mask_embs[img_idx].unsqueeze(1), 
-            siglip_text_embeds.unsqueeze(0), 
-            dim=-1
-        )
-
         merged_masks = {}
-        for c_idx, class_name in enumerate(gt_class_names):
-            gt_class_id = gt_class_ids[c_idx]
-            
+        if siglip_mask_embs[img_idx] is None:
+            batch_masks.append(merged_masks)
+            continue
+
+        similarity = F.cosine_similarity(siglip_mask_embs[img_idx].unsqueeze(1), siglip_text_embeds.unsqueeze(0), dim=-1)
+
+        for c_idx, class_name in enumerate(prompt_class_names):
+            gt_class_id = prompt_class_ids[c_idx]
             class_sims = similarity[:, c_idx]
-            
             passing_indices = (class_sims > COSSIM_THRESHOLD).nonzero(as_tuple=True)[0]
                 
             if len(passing_indices) == 0:
                 continue
-        
-            # Extract masks above threshold: shape [K, H, W]
-            selected_masks = all_fsam_masks[img_idx][passing_indices]
-            
-            # Merge selected masks along dimension 0 using bitwise OR
-            combined_mask = selected_masks.any(dim=0)  # Equivalent to bitwise OR reduction across mask axis
-            
-            mask_np = (combined_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)  # Convert mask to 0-255
-            mask_resized = cv2.resize(
-                mask_np, 
-                (IMG_W, IMG_H), 
-                interpolation=cv2.INTER_NEAREST
-            )
 
-            if gt_class_id in merged_masks:
-                merged_masks[gt_class_id].append(mask_resized)
-            else:
-                merged_masks[gt_class_id] = [mask_resized]
-    
+            # Same un-merging as predict_clip above -- keep each passing
+            # FastSAM proposal as its own (mask, score) instance.
+            for idx in passing_indices:
+                mask = all_fsam_masks[img_idx][idx]
+                score = float(class_sims[idx].item())
+
+                mask_np = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+                mask_resized = cv2.resize(mask_np, (IMG_W, IMG_H), interpolation=cv2.INTER_NEAREST)
+
+                if gt_class_id in merged_masks:
+                    merged_masks[gt_class_id].append((mask_resized, score))
+                else:
+                    merged_masks[gt_class_id] = [(mask_resized, score)]
         batch_masks.append(merged_masks)
         
     return batch_masks
-    
 
+# ------------------------------------------------------------------------------------------
+# ----------------------------- Helper API (Exposed Functions) -----------------------------
+# ------------------------------------------------------------------------------------------
 
-def run_experiment1(
-    images, 
-    image_paths,
-    gt_masks, 
-    class_ids, 
-    class_names, 
-    category_name_dict, 
-    model_name, 
-    output_folder, 
-    batch_size=8,
-    device="cuda:0",
-    custom_prompts=None,
-    void_class_ids=None
-):
+def init_model(model_name, prompt_class_names, device):
+    """Loads and returns the specified model."""
+    if model_name not in LOAD_MODEL_ENUM:
+        raise ValueError(f"Model {model_name} not supported. Choose from {list(LOAD_MODEL_ENUM.keys())}.")
+    return LOAD_MODEL_ENUM[model_name](prompt_class_names, device)
 
-    if custom_prompts is None:
-        custom_prompts = ["boat", "person", "shore"]
-        
-    name_to_id = {v: k for k, v in category_name_dict.items()}
-    eval_category_dict = {}
-    eval_class_ids = []
-    eval_class_names = []
+def predict_batch_masks(model, current_model_name, batch_images, batch_image_paths, prompt_class_ids, prompt_class_names, device):
+    """Routes the batch to the correct prediction function based on model name."""
+    if current_model_name == "yoloe":
+        return predict_yoloe(model, batch_images, prompt_class_ids, device)
+    elif current_model_name == "sam3":
+        return predict_sam3(model, batch_images, prompt_class_ids, prompt_class_names, device)
+    elif current_model_name == "gsam":
+        return predict_gsam(model, batch_image_paths, prompt_class_ids, prompt_class_names, device)
+    elif current_model_name == "clip":
+        return predict_clip(model, batch_images, prompt_class_ids, prompt_class_names, device)
+    elif current_model_name == "siglip":
+        return predict_siglip(model, batch_images, prompt_class_ids, prompt_class_names, device)
+    else:
+        raise ValueError(f"Unknown model name: {current_model_name}")
 
-    # Map prompts to GT IDs, generating negative IDs for prompts without GT
-    neg_id_counter = -1
-    for prompt in custom_prompts:
-        if prompt in name_to_id:
-            prompt_id = name_to_id[prompt]
-        else:
-            prompt_id = neg_id_counter
-            neg_id_counter -= 1
-        
-        eval_category_dict[prompt_id] = prompt
-        eval_class_ids.append(prompt_id)
-        eval_class_names.append(prompt)
-    
-    available_models = ["yoloe", "sam3", "gsam", "clip", "siglip"]
-    if model_name != "all" and model_name not in available_models:
-        print(f"Model not available. Choose from {available_models}.")
-        exit()
-    elif model_name != "all":
-        available_models = [model_name]
-    
-    for available_model_name in available_models:
-        
-        model = LOAD_MODEL_ENUM[available_model_name](eval_class_names, device)
-        
-        print(f"Running {available_model_name}...")
-        
-        evaluation = None
-        
-        for start_idx in range(0, len(images), batch_size):
-
-            end_idx = min(
-                start_idx + batch_size,
-                len(images),
-            )
-
-            batch_images = images[start_idx:end_idx]
-            batch_image_paths = image_paths[start_idx:end_idx]
-            batch_gt_masks = gt_masks[start_idx:end_idx]
-            batch_class_ids = class_ids[start_idx:end_idx]
-            
-            start_time = time.perf_counter()
-            if available_model_name == "yoloe":
-                batch_masks = predict_yoloe(
-                    model,
-                    batch_images,
-                    eval_class_ids,
-                    device
-                )
-            elif available_model_name == "sam3":
-                batch_masks = predict_sam3(
-                    model,
-                    batch_images,
-                    eval_class_ids,
-                    eval_class_names,
-                    device
-                )
-            elif available_model_name == "gsam":
-                batch_masks = predict_gsam(
-                    model,
-                    batch_image_paths,
-                    eval_class_ids,
-                    eval_class_names,
-                    device
-                )
-            elif available_model_name == "clip":
-                batch_masks = predict_clip(
-                    model,
-                    batch_images,
-                    eval_class_ids,
-                    eval_class_names,
-                    device
-                )
-            elif available_model_name == "siglip":
-                batch_masks = predict_siglip(
-                    model,
-                    batch_images,
-                    eval_class_ids,
-                    eval_class_names,
-                    device
-                )
-            runtime = time.perf_counter() - start_time
-            
-            # Evaluate batch masks
-            evaluation = evaluate_batch(
-                batch_masks=batch_masks,
-                batch_gt_masks=batch_gt_masks,
-                batch_class_ids=batch_class_ids,
-                batch_images=batch_images,
-                class_ids=eval_class_ids,
-                void_class_ids=void_class_ids,
-                accumulator=evaluation,
-                runtime=runtime,
-            )
-    
-        # ---------------------------------------------------------
-        # Finalize metrics over entire dataset
-        # ---------------------------------------------------------
-        if output_folder:
-            results = finalize_evaluation(
-                evaluation,
-                eval_category_dict,
-                csv_path=os.path.join(output_folder,f"{model_name}_final_results.csv"),
-            )
-        else:
-            results = finalize_evaluation(
-                evaluation,
-                eval_category_dict,
-            )
-
-        print_evaluation_results(results)
-        
-        # --- cleanup before loading the next model ---
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+def cleanup_model(model):
+    """Frees up GPU memory after all batches are done."""
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
