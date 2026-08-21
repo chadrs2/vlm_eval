@@ -1,0 +1,11 @@
+GT_Class,bridge,building,car,mountain,person,pier,shore-artificial,sky,vegetation,water
+bridge,31761,0,0,0,249,0,0,0,0,0
+building,0,0,0,0,0,0,0,0,0,0
+car,0,0,1968,0,0,0,0,0,0,0
+mountain,0,0,0,0,0,0,112,137,0,0
+person,439,0,152,0,2154,0,0,0,0,0
+pier,0,0,0,0,0,0,16427,0,0,0
+shore-artificial,0,0,0,0,0,0,1178,0,0,0
+sky,1223,0,0,0,0,0,0,176939,0,0
+vegetation,8204,0,0,0,65,0,306,0,0,0
+water,6,0,0,0,1965,0,570647,0,0,0

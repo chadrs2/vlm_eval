@@ -1,0 +1,6 @@
+Pair: vegetation vs mountain
+,Pred: vegetation,Pred: mountain,Pred: Neither
+GT: vegetation,0,0,227707
+GT: mountain,0,0,39484
+GT: Neither,0,0,1428522
+

@@ -1,0 +1,28 @@
+# Define arrays for datasets and models
+DATASETS=("data/HawaiiRoboflow" "data/LaRS")
+MODELS=("yoloe")
+
+# Loop over each dataset and model
+for dataset in "${DATASETS[@]}"; do
+    for model in "${MODELS[@]}"; do
+        echo "=================================================="
+        echo "Running Model: $model on Dataset: $dataset"
+        echo "=================================================="
+        
+        # Check if the model is gsam to set the device to cpu
+        if [ "$model" == "gsam" ]; then
+            DEVICE="cpu"
+        else
+            DEVICE="cuda:0"
+        fi
+        
+        # Execute run_experiment1.py with the selected device
+        python experiments/exp1_text2mask/run_experiment1.py gsam \
+            --image_dataset "$dataset" \
+            --model "$model" \
+            --device "$DEVICE" \
+            --output "/results/gsam/trial1"
+    done
+done
+
+python3 experiments/exp1_text2mask/run_experiment1.py gsam --image_dataset=data/test --output=experiments/exp1_text2mask/results/gsam/test --model=yoloe 
