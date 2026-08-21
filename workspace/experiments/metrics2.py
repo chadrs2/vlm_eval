@@ -149,6 +149,12 @@ def compute_topk_retrieval(pool, k_values=DEFAULT_K_VALUES, min_class_count=2):
     # histogram, which is a more informative diagnostic than accuracy alone.
     nn_similarity = np.full(n, np.nan)
     nn_correct = np.zeros(n, dtype=bool)
+    # Top-1 predicted class per query -- independent of which k's are in
+    # k_values (a confusion matrix only makes sense for a single predicted
+    # class, so this is always the nearest neighbor's class, not the top-k
+    # set). Sentinel -1 for unscoreable rows; those are dropped via the
+    # `scoreable` mask wherever this is consumed.
+    nn_predicted_class = np.full(n, -1, dtype=class_ids.dtype)
 
     for i in range(n):
         if not scoreable[i]:
@@ -162,6 +168,7 @@ def compute_topk_retrieval(pool, k_values=DEFAULT_K_VALUES, min_class_count=2):
 
         nn_similarity[i] = sim_matrix[i, order[0]]
         nn_correct[i] = bool(retrieved_classes[0] == query_class)
+        nn_predicted_class[i] = retrieved_classes[0]
 
     per_class_topk = {k: {} for k in k_values}
     for k in k_values:
@@ -205,12 +212,14 @@ def compute_topk_retrieval(pool, k_values=DEFAULT_K_VALUES, min_class_count=2):
         n, int(scoreable.sum()), k_values,
         nn_similarity=nn_similarity[scoreable], nn_correct=nn_correct[scoreable],
         per_class_chance=per_class_chance, overall_chance=overall_chance,
+        nn_query_class=class_ids[scoreable], nn_predicted_class=nn_predicted_class[scoreable],
     )
 
 
 def _build_results_dict(per_class_topk, overall_topk, class_counts, unscoreable_classes,
                          num_instances, num_scoreable, k_values, nn_similarity=None, nn_correct=None,
-                         per_class_chance=None, overall_chance=None):
+                         per_class_chance=None, overall_chance=None,
+                         nn_query_class=None, nn_predicted_class=None):
     return {
         "per_class_topk": per_class_topk,
         "overall_topk": overall_topk,
@@ -223,6 +232,13 @@ def _build_results_dict(per_class_topk, overall_topk, class_counts, unscoreable_
         "nn_correct": nn_correct if nn_correct is not None else np.array([]),
         "per_class_chance": per_class_chance if per_class_chance is not None else {k: {} for k in k_values},
         "overall_chance": overall_chance if overall_chance is not None else {k: float("nan") for k in k_values},
+        # Top-1 query/predicted class pairs, in lockstep -- the raw material
+        # for a confusion matrix (see compute_confusion_matrix). Kept
+        # separate from per_class_topk/overall_topk since those cover every
+        # k in k_values, while a confusion matrix is inherently a top-1-only
+        # view (a query can only be "confused for" one class at a time).
+        "nn_query_class": nn_query_class if nn_query_class is not None else np.array([]),
+        "nn_predicted_class": nn_predicted_class if nn_predicted_class is not None else np.array([]),
     }
 
 
@@ -230,14 +246,14 @@ def _build_results_dict(per_class_topk, overall_topk, class_counts, unscoreable_
 # ------------------------------------------- Display ----------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def print_topk_results(results, category_name_dict, model_name, dataset_name):
+def print_topk_results(results, category_name_dict, model_name, dataset_name, experiment_label="EXPERIMENT 2"):
     print("\n" + "=" * 80)
-    print(f"EXPERIMENT 2 RESULTS: {model_name} ({dataset_name})")
+    print(f"{experiment_label} RESULTS: {model_name} ({dataset_name})")
     print("=" * 80)
 
     print(f"Total GT instances:      {results['num_instances']}")
     print(f"Scoreable instances:     {results['num_scoreable']}  "
-          f"(excludes classes with < min_class_count total instances)")
+          f"(excludes instances whose class didn't meet this experiment's scoring criteria)")
 
     for k in results["k_values"]:
         obs = results['overall_topk'][k]
@@ -268,7 +284,7 @@ def print_topk_results(results, category_name_dict, model_name, dataset_name):
         print(row)
 
     if results["unscoreable_classes"]:
-        print("\nUnscoreable classes (< min_class_count instances in dataset):")
+        print("\nUnscoreable classes (didn't meet this experiment's scoring criteria):")
         for cid in results["unscoreable_classes"]:
             name = category_name_dict.get(cid, str(cid))
             print(f"  {name} (count={results['class_counts'][cid]})")
@@ -310,6 +326,126 @@ def save_topk_csv(results, category_name_dict, csv_path):
             overall_row[f"top_{k}_chance"] = chance
             overall_row[f"top_{k}_excess"] = obs - chance if not (np.isnan(obs) or np.isnan(chance)) else ""
         writer.writerow(overall_row)
+
+
+# ------------------------------------------------------------------------------------------
+# ----------------------------------- Confusion Matrix (top-1) ------------------------------
+# ------------------------------------------------------------------------------------------
+#
+# Top-k accuracy tells you *whether* the nearest neighbors include the right
+# class; it doesn't say *what else* they tend to be instead. For a
+# cross-domain comparison (e.g. coastal vs. terrestrial) that's exactly the
+# interesting part -- a domain gap usually shows up as specific, structured
+# confusions (e.g. buoy <-> boat) rather than uniformly-worse accuracy. This
+# only makes sense at top-1: "confused for class X" requires a single
+# predicted class, and top-k's notion of correctness ("was the right class
+# *anywhere* in the top-k") doesn't reduce to one. So regardless of which
+# k's were requested via `top_k` in the YAML, the confusion matrix always
+# uses the nearest neighbor's class -- computed once in compute_topk_retrieval
+# and threaded through in results["nn_query_class"] / results["nn_predicted_class"].
+
+def compute_confusion_matrix(results, normalize="row"):
+    """
+    Row-normalized (by default) top-1 confusion matrix over scoreable
+    classes only -- unscoreable classes (< min_class_count instances) are
+    excluded from compute_topk_retrieval's nn_* arrays already, so nothing
+    extra to filter here.
+
+    normalize: "row" (each row -- true class -- sums to 1, so the matrix
+    reads as "given this true class, what fraction of queries were
+    predicted as each class"; robust to class imbalance, which coastal
+    datasets tend to have a lot of), "none" (raw counts), or "all" (whole
+    matrix sums to 1).
+
+    Returns {"class_ids": [...], "matrix": np.ndarray} where matrix[i, j] is
+    class_ids[i] (true) vs. class_ids[j] (predicted). class_ids is sorted
+    for stable, reproducible axis ordering across runs/models.
+    """
+    query_class = np.asarray(results["nn_query_class"])
+    pred_class = np.asarray(results["nn_predicted_class"])
+
+    if query_class.size == 0:
+        return {"class_ids": [], "matrix": np.zeros((0, 0))}
+
+    class_ids = sorted(set(query_class.tolist()) | set(pred_class.tolist()))
+    index = {cid: i for i, cid in enumerate(class_ids)}
+    n = len(class_ids)
+
+    matrix = np.zeros((n, n), dtype=np.float64)
+    for true_c, pred_c in zip(query_class, pred_class):
+        matrix[index[true_c], index[pred_c]] += 1
+
+    if normalize == "row":
+        row_sums = matrix.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        matrix = matrix / row_sums
+    elif normalize == "all":
+        total = matrix.sum()
+        if total > 0:
+            matrix = matrix / total
+    elif normalize != "none":
+        raise ValueError(f"Unknown normalize option: {normalize!r}")
+
+    return {"class_ids": class_ids, "matrix": matrix}
+
+
+def save_confusion_matrix_csv(confusion, category_name_dict, csv_path):
+    """Raw (unnormalized) counts, so the CSV is a re-derivable source of
+    truth regardless of what normalization a given plot used."""
+    class_ids = confusion["class_ids"]
+    matrix = confusion["matrix"]
+    names = [category_name_dict.get(cid, str(cid)) for cid in class_ids]
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["true_class \\ predicted_class"] + names)
+        for name, row in zip(names, matrix):
+            writer.writerow([name] + [f"{v:.6g}" for v in row])
+
+
+def plot_confusion_matrix(confusion, category_name_dict, model_name, dataset_name, save_path=None):
+    """Heatmap of the top-1 confusion matrix. Cells are annotated with their
+    value when the class count is small enough to stay readable; for large
+    class counts the color alone carries the signal (labels would just
+    overlap)."""
+    class_ids = confusion["class_ids"]
+    matrix = confusion["matrix"]
+    n = len(class_ids)
+
+    if n == 0:
+        print("No scoreable instances -- skipping confusion matrix plot.")
+        return
+
+    names = [category_name_dict.get(cid, str(cid)) for cid in class_ids]
+    side = max(6, 0.5 * n)
+    fig, ax = plt.subplots(figsize=(side + 1.5, side))
+
+    im = ax.imshow(matrix, cmap="viridis", vmin=0, vmax=matrix.max() if matrix.max() > 0 else 1)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(names, rotation=90)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(names)
+    ax.set_xlabel("Predicted class (top-1 nearest neighbor)")
+    ax.set_ylabel("True class")
+    ax.set_title(f"Top-1 confusion matrix\n{model_name} ({dataset_name})")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    if n <= 25:
+        thresh = matrix.max() / 2 if matrix.max() > 0 else 0.5
+        for i in range(n):
+            for j in range(n):
+                val = matrix[i, j]
+                if val > 0:
+                    ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                            color="white" if val < thresh else "black", fontsize=7)
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        print(f"Saved confusion matrix to: {save_path}")
+    plt.show()
+    plt.close(fig)
 
 
 # ------------------------------------------------------------------------------------------

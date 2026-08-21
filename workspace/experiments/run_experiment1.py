@@ -190,6 +190,50 @@ def load_data(dataset_dir, annotation_file=None, image_subset=-1):
     )
 
 # ------------------------------------------------------------------------------------------
+# ----------------------------------- Prompt Mapping ----------------------------------------
+# ------------------------------------------------------------------------------------------
+
+def build_prompt_mapping(custom_prompts, name_to_id):
+    """
+    Turn a standardized custom_prompts dict (target_class_name -> comma-
+    separated prompt string, as produced by load_data's "Standardize Custom
+    Prompts Mapping" step above) into:
+
+      prompt_category_dict: {target_id: target_class_name}, one entry per
+        target class. target_id is the class's real COCO category id when
+        target_class_name matches an existing dataset category (via
+        name_to_id); otherwise a synthetic negative id is minted for it --
+        a prompt with no matching GT category (e.g. a pure distractor
+        prompt meant to compete against real classes, never itself
+        scoreable against GT).
+
+      prompt_groups: {target_id: [prompt_str, ...]}, that class's
+        individual (comma-split) prompt phrases, in YAML order.
+
+    This is exactly the target-class/prompt-id bookkeeping this file's
+    __main__ below does to build prompt_category_dict / prompt_class_ids /
+    prompt_class_names for Experiment 1's text-to-mask prediction -- pulled
+    out into its own function so other experiments (e.g. run_experiment3.py)
+    can reuse the same target-class definitions instead of duplicating this
+    logic or relying on a separate `instance_classes` YAML key.
+    """
+    prompt_category_dict = {}
+    prompt_groups = {}
+    neg_id_counter = -1
+
+    for target_class, prompt_string in custom_prompts.items():
+        if target_class in name_to_id:
+            prompt_id = name_to_id[target_class]
+        else:
+            prompt_id = neg_id_counter
+            neg_id_counter -= 1
+
+        prompt_category_dict[prompt_id] = target_class
+        prompt_groups[prompt_id] = [p.strip() for p in str(prompt_string).split(",") if p.strip()]
+
+    return prompt_category_dict, prompt_groups
+
+# ------------------------------------------------------------------------------------------
 # --------------------------------------- Lazy Decode --------------------------------------
 # ------------------------------------------------------------------------------------------
 
@@ -472,24 +516,10 @@ if __name__ == "__main__":
     debug_visualize_random_image(image_paths, ann_ids_list, coco, category_names, ignore_ids, coco_id_remap)
 
     name_to_id = {v: k for k, v in gt_class_dict.items()}
-    prompt_category_dict = {}
-    prompt_class_ids = []
-    prompt_class_names = []
-
-    neg_id_counter = -1
-
-    for target_class, prompt_string in custom_prompts.items():
-        if target_class in name_to_id:
-            prompt_id = name_to_id[target_class]
-        else:
-            prompt_id = neg_id_counter
-            neg_id_counter -= 1
-
-        prompt_category_dict[prompt_id] = target_class
-        prompts = [p.strip() for p in str(prompt_string).split(",")]
+    prompt_category_dict, prompt_groups = build_prompt_mapping(custom_prompts, name_to_id)
+    prompt_class_ids, prompt_class_names = [], []
+    for prompt_id, prompts in prompt_groups.items():
         for p in prompts:
-            if not p:
-                continue
             prompt_class_ids.append(prompt_id)
             prompt_class_names.append(p)
 

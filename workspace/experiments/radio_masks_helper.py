@@ -190,6 +190,52 @@ def embed_gt_masks(model_name, model, images, batch_gt_masks, batch_gt_class_ids
 
 
 # ------------------------------------------------------------------------------------------
+# ----------------------------- Text-Class Embeddings (Experiment 3) -----------------------
+# ------------------------------------------------------------------------------------------
+#
+# Despite the note in run_experiment3.py's TEXT_CAPABLE_MODELS_BY_ENV
+# claiming "RADIO has no text tower at all in its published architecture",
+# that's only true of RADIO's *native* backbone -- it is NOT true of the
+# siglip2 adaptor this file actually uses. `_predict_radio` above already
+# builds a text tower via `adaptor.tokenizer` / `adaptor.encode_text` and
+# compares it directly against `spatial_vision_features` with a plain dot
+# product (`similarity = torch.matmul(text_tokens, spatial_feats.T)`) --
+# no extra projection layer in between. That only works if text and
+# spatial features already live in the same joint space, which means the
+# siglip2 adaptor's text tower is exactly the text embedding `embed_gt_masks`
+# above's visual embeddings (also drawn from `vis_output[adaptor_name]`)
+# need for Experiment 3. So unlike clipdino/gsam's architectural
+# exclusions elsewhere in this codebase, RADIO's case is just a stale
+# comment in run_experiment3.py, not a real limitation -- update that
+# TEXT_CAPABLE_MODELS_BY_ENV entry alongside adding this function.
+
+def _radio_embed_text(model, class_names, device, adaptor_name="siglip2"):
+    adaptor = model.adaptors[adaptor_name]
+    text_input = adaptor.tokenizer(class_names).to(device)
+    with torch.no_grad():
+        text_tokens = adaptor.encode_text(text_input, normalize=True)
+    return text_tokens.detach().cpu().numpy()
+
+
+def embed_text_classes(model_name, model, class_names, device):
+    """
+    Embed a word bank of class names for Experiment 3, using the siglip2
+    adaptor's text tower -- the same `adaptor.tokenizer` / `adaptor.encode_text`
+    call `_predict_radio` already uses, so this lands in exactly the joint
+    space `embed_gt_masks`'s pooled spatial-feature embeddings live in (see
+    module note above). `normalize=True` matches the L2-normalization
+    `embed_gt_masks` applies to its own pooled mask embeddings.
+
+    `model_name` is accepted for API parity with the other helpers'
+    embed_text_classes (gsam routes on it; this file only ever loads one
+    model, so it's unused here).
+
+    Returns an (len(class_names), D) L2-normalized np.ndarray.
+    """
+    return _radio_embed_text(model, class_names, device)
+
+
+# ------------------------------------------------------------------------------------------
 # ----------------------------- Helper API (Exposed Functions) -----------------------------
 # ------------------------------------------------------------------------------------------
 

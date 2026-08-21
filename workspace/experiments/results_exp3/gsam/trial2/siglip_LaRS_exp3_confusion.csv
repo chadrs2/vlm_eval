@@ -1,0 +1,4 @@
+true_class \ predicted_class,Buoy,Float,person
+Buoy,0.353316,0.433036,0.213648
+Float,0.173913,0.565217,0.26087
+person,0.184794,0.445618,0.369588

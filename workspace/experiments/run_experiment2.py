@@ -16,6 +16,9 @@ from metrics2 import (
     plot_topk_histogram,
     print_skip_summary,
     save_skip_log_csv,
+    compute_confusion_matrix,
+    save_confusion_matrix_csv,
+    plot_confusion_matrix,
     DEFAULT_K_VALUES,
 )
 
@@ -33,6 +36,7 @@ def run_experiment(
     image_paths, ann_ids_list, coco, category_names, ignore_ids,
     query_class_ids, env="gsam", model_name="clip", batch_size=8, device="cuda:0",
     coco_id_remap=None, global_vocab=None,
+    text_class_ids=None, text_class_names=None,
 ):
     """
     Pass 1 (this function): decode every image's GT masks, embed each one
@@ -41,10 +45,22 @@ def run_experiment(
     top-k retrieval needs the *entire* pool at once (a query's neighbors can
     live in any image), so nothing is scored until every batch is embedded.
 
-    Returns (pool, skip_log): skip_log is every GT instance embed_gt_masks
-    could not embed (e.g. gsam/sam3's masked-pooling collapsing to 0
-    feature cells for a small object), each tagged with image_id, class_id,
-    and why -- see metrics2.print_skip_summary/save_skip_log_csv.
+    text_class_ids / text_class_names: optional parallel lists (same
+    convention as prompt_class_ids/prompt_class_names elsewhere in this
+    codebase) -- if both are given, the same loaded `model` is also used to
+    embed this word bank via helper.embed_text_classes, BEFORE
+    helper.cleanup_model runs, so Experiment 3 (run_experiment3.py) can
+    reuse this exact function to get both the visual embedding pool and a
+    matching word bank out of one model load, rather than loading the model
+    twice. Leave both None (the default) for plain Experiment 2 behavior.
+
+    Returns (pool, skip_log, word_bank): skip_log is every GT instance
+    embed_gt_masks could not embed (e.g. gsam/sam3's masked-pooling
+    collapsing to 0 feature cells for a small object), each tagged with
+    image_id, class_id, and why -- see
+    metrics2.print_skip_summary/save_skip_log_csv. word_bank is
+    {"embeddings": ..., "class_ids": ...} if text_class_ids/text_class_names
+    were given, else None.
     """
     if env == "gsam":
         import gsam_masks_helper as helper
@@ -125,11 +141,18 @@ def run_experiment(
             print(f"WARNING: batch {batch_num + 1}/{num_batches} failed with {type(e).__name__}: {e}")
             continue
 
+    word_bank = None
+    if text_class_ids is not None and text_class_names is not None:
+        # Built from the same still-loaded `model` used for the pool above,
+        # before cleanup -- see this function's docstring.
+        text_embeddings = helper.embed_text_classes(model_name, model, text_class_names, device)
+        word_bank = {"embeddings": text_embeddings, "class_ids": np.asarray(text_class_ids)}
+
     helper.cleanup_model(model)
     print(f"Embedded {len(pool['embeddings'])} GT instances in {total_runtime:.2f} sec.")
     if skip_log:
         print(f"  ({len(skip_log)} GT instances could not be embedded -- see skip summary below)")
-    return pool, skip_log
+    return pool, skip_log, word_bank
 
 
 # ------------------------------------------------------------------------------------------
@@ -227,7 +250,7 @@ if __name__ == "__main__":
     # discriminative as possible.
     global_vocab = list(gt_class_dict.values())
 
-    pool, skip_log = run_experiment(
+    pool, skip_log, _word_bank = run_experiment(
         image_paths,
         ann_ids_list,
         coco,
@@ -243,6 +266,10 @@ if __name__ == "__main__":
     )
 
     results = compute_topk_retrieval(pool, k_values=k_values, min_class_count=min_class_count)
+    # Top-1 only, regardless of what's in k_values (see metrics2's confusion
+    # matrix section for why) -- runs alongside the top-1/3/5 accuracy above,
+    # not instead of it.
+    confusion = compute_confusion_matrix(results, normalize="row")
 
     print_topk_results(results, gt_class_dict, args.model, dataset_name)
     print_skip_summary(skip_log, gt_class_dict, num_instances_attempted=len(pool["embeddings"]) + len(skip_log))
@@ -259,5 +286,13 @@ if __name__ == "__main__":
 
         plot_path = os.path.join(output_folder, f"{args.model}_{dataset_name}_exp2_histogram.png")
         plot_topk_histogram(results, gt_class_dict, args.model, dataset_name, k=plot_k, save_path=plot_path)
+
+        confusion_csv_path = os.path.join(output_folder, f"{args.model}_{dataset_name}_exp2_confusion.csv")
+        save_confusion_matrix_csv(confusion, gt_class_dict, confusion_csv_path)
+        print(f"Saved confusion matrix to: {confusion_csv_path}")
+
+        confusion_plot_path = os.path.join(output_folder, f"{args.model}_{dataset_name}_exp2_confusion.png")
+        plot_confusion_matrix(confusion, gt_class_dict, args.model, dataset_name, save_path=confusion_plot_path)
     else:
         plot_topk_histogram(results, gt_class_dict, args.model, dataset_name, k=plot_k)
+        plot_confusion_matrix(confusion, gt_class_dict, args.model, dataset_name)

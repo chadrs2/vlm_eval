@@ -806,6 +806,94 @@ def embed_gt_masks(model_name, model, images, batch_gt_masks, batch_gt_class_ids
 
 
 # ------------------------------------------------------------------------------------------
+# ------------------------------- Text-Class Embeddings (Experiment 3) ---------------------
+# ------------------------------------------------------------------------------------------
+#
+# Experiment 3 (image mask -> text) needs a *word bank*: one text embedding
+# per candidate class, living in the SAME space as embed_gt_masks's visual
+# embeddings above, so a GT mask's embedding can be cosine-compared against
+# every class name at once.
+#
+# "clip" / "siglip" qualify directly -- embed_gt_masks for these two already
+# runs the image tower of a real joint image-text model, so the matching
+# text tower here lands in exactly that space.
+#
+# "gsam" / "sam3" do NOT qualify, on purpose: embed_gt_masks for those two
+# intentionally pulls a text-INDEPENDENT vision-backbone feature (see the
+# "GT Mask Embeddings" section above -- GroundingDINO's Swin backbone
+# pre-fusion, SAM3's raw Perception-Encoder feature map). Nothing trained
+# those features to align with any text encoder, so there is no text
+# embedding that would be meaningfully comparable to them -- computing one
+# anyway would produce a similarity score that *looks* valid but measures
+# nothing. This raises NotImplementedError instead of guessing at an
+# undocumented alignment path, same policy as this file's "yoloe" guard.
+# Wiring gsam/sam3 up for real would mean extracting embeddings through
+# their actual text-alignment mechanism (GroundingDINO's BERT +
+# feature-enhancer cross-attention output; SAM3's own text encoder) instead
+# of the vision-only path embed_gt_masks uses -- a different extraction,
+# not just a different embed_text_classes branch.
+
+def _clip_embed_text(clip_model, class_names):
+    """Same prompt template as predict_clip's text branch, so exp2's crop
+    embeddings and exp3's word bank are built the same way."""
+    prompts = [f"a photo of a {class_name}" for class_name in class_names]
+    toks = clip_model.tokenize(prompts)
+    with torch.no_grad():
+        embs = clip_model.encode_text(toks)
+        embs = F.normalize(embs, p=2, dim=-1)
+    return embs.detach().cpu().numpy()
+
+
+def _siglip_embed_text(siglip_processor, siglip_model, class_names, device):
+    """Same prompt template as predict_siglip's text branch."""
+    prompts = [f"a photo of a {class_name}" for class_name in class_names]
+    text_inputs = siglip_processor(text=prompts, return_tensors="pt", padding="max_length").to(device)
+    with torch.no_grad():
+        embs = siglip_model.get_text_features(**text_inputs)
+        embs = F.normalize(embs, p=2, dim=-1)
+    return embs.detach().cpu().numpy()
+
+
+def embed_text_classes(model_name, model, class_names, device):
+    """
+    Embed a word bank of class names for Experiment 3, in the same space as
+    embed_gt_masks's visual embeddings for `model_name`.
+
+    class_names: list of class-name strings (e.g. gt_class_dict.values()),
+    in a fixed order -- the caller is responsible for keeping a parallel
+    list of class ids to attach to each row of the returned array.
+
+    Returns an (len(class_names), D) L2-normalized np.ndarray.
+
+    Raises NotImplementedError for "gsam"/"sam3" -- see the module note
+    above this function for why those two don't have a valid text space to
+    embed into here. Raises ValueError for anything else unsupported
+    (matches embed_gt_masks's "yoloe" behavior).
+    """
+    if model_name == "clip":
+        clip_model = model[1]
+        return _clip_embed_text(clip_model, class_names)
+    elif model_name == "siglip":
+        siglip_processor, siglip_model = model[1], model[2]
+        return _siglip_embed_text(siglip_processor, siglip_model, class_names, device)
+    elif model_name in ("gsam", "sam3"):
+        raise NotImplementedError(
+            f"'{model_name}' has no text embedding compatible with embed_gt_masks's "
+            f"visual embedding space -- that space is deliberately text-independent "
+            f"(see the module note above embed_text_classes). Experiment 3 can't use "
+            f"'{model_name}' until a separate extraction through its actual "
+            f"text-alignment mechanism is implemented."
+        )
+    else:
+        raise ValueError(
+            f"Model '{model_name}' does not support text-embedding extraction. "
+            f"Choose from ['clip', 'siglip'] -- 'gsam'/'sam3' are architecturally "
+            f"unsupported (see above) and 'yoloe' has no usable embedding API in "
+            f"this codebase."
+        )
+
+
+# ------------------------------------------------------------------------------------------
 # ----------------------------- Helper API (Exposed Functions) -----------------------------
 # ------------------------------------------------------------------------------------------
 

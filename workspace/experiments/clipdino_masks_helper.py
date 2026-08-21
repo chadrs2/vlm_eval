@@ -201,6 +201,66 @@ def embed_gt_masks(model_name, model, images, batch_gt_masks, batch_gt_class_ids
 
 
 # ------------------------------------------------------------------------------------------
+# ----------------------------- Text-Class Embeddings (Experiment 3) -----------------------
+# ------------------------------------------------------------------------------------------
+#
+# CLIP-DINOiser has no raw text-encoder call exposed the way CLIP/SigLIP do
+# (see the note above embed_gt_masks), so there's no way to build a "real"
+# text embedding here. But embed_gt_masks above already embeds a GT mask as
+# its mean *per-vocab-class probability*, pooled over the mask -- so the
+# self-consistent word-bank entry for class c is simply the standard basis
+# (one-hot) vector at class c's position in that SAME vocabulary. Cosine
+# similarity between a mask's pooled-probability embedding and class c's
+# one-hot row then reduces to exactly the mask's mean predicted probability
+# of being class c (up to the mask embedding's own L2 norm) -- i.e.
+# ranking word-bank classes by similarity is just ranking classes by the
+# model's own per-pixel classification, which is the only notion of
+# "text embedding" this architecture actually supports.
+#
+# `_run_clipdino_forward` always builds `full_vocab = ["background"] + vocab`
+# when called with apply_found=True (which embed_gt_masks always does), so
+# index 0 of every pooled GT-mask embedding is the background channel and
+# class i of the vocab lives at index i+1. embed_text_classes reproduces
+# that exact offset so its one-hot rows line up with embed_gt_masks's
+# pooled probability vectors dimension-for-dimension.
+#
+# CRITICAL: this only lands in the same space as your embedding pool if
+# `class_names` here is IDENTICAL -- same classes, same order -- to the
+# `global_vocab` passed into embed_gt_masks/run_experiment when that pool
+# was built. If they differ, index i means a different class in the word
+# bank than it does in the pool, and every similarity score is silently
+# wrong (not an error -- just meaningless numbers that still run). This is
+# NOT enforced or checked here since embed_text_classes has no visibility
+# into what global_vocab another call used; run_experiment3.py enforces it
+# by passing the exact same list as both `global_vocab` and
+# `text_class_names` -- don't change one without the other.
+
+def embed_text_classes(model_name, model, class_names, device, apply_found=True):
+    """
+    Build a one-hot word bank for Experiment 3 in the same
+    background-offset vocab space embed_gt_masks pools its GT-mask
+    embeddings into. See the module note above for why a one-hot vector is
+    the correct (and only self-consistent) "text embedding" for this
+    architecture, and the critical ordering requirement vs. `global_vocab`.
+
+    `model`/`device` are accepted for API parity with the other helpers'
+    embed_text_classes but unused here -- this is a pure construction, no
+    forward pass needed.
+
+    Returns an (len(class_names), len(class_names) + 1) np.ndarray -- one
+    row per class, a 1.0 at that class's background-offset vocab index and
+    0 elsewhere. Already unit-norm (one-hot), so no separate normalization
+    step is needed.
+    """
+    n = len(class_names)
+    offset = 1 if apply_found else 0
+    embeddings = np.zeros((n, n + offset), dtype=np.float64)
+    for i in range(n):
+        embeddings[i, i + offset] = 1.0
+    return embeddings
+
+
+# ------------------------------------------------------------------------------------------
 # ----------------------------- Helper API (Exposed Functions) -----------------------------
 # ------------------------------------------------------------------------------------------
 
